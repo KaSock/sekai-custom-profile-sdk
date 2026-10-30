@@ -1,0 +1,40 @@
+name: Build BOT renderer (Windows)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+          'C:\Program Files\NASM' | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build and test adapted renderer
+        shell: pwsh
+        run: ./build-bot.ps1 -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT -InstallDependencies -Test
+      - name: Package runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bot-renderer -Force | Out-Null
+          Copy-Item target/release/sekai-profile.exe bot-renderer/
+          Copy-Item target/release/*.dll bot-renderer/
+          Copy-Item bot_service.py,bot_service.example.json,LICENSE bot-renderer/
+          Copy-Item docs/BOT_DEPLOYMENT.zh-CN.md bot-renderer/
+          Copy-Item docs/fonts-and-assets.md bot-renderer/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: allium-bot-windows-x64
+          path: bot-renderer/
+          if-no-files-found: error

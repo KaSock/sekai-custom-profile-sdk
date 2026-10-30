@@ -17,6 +17,8 @@ path = "src/main.rs"
 # JPEG output needs `jpeg-turbo`; PNG output needs no feature.
 default = ["jpeg-turbo"]
 jpeg-turbo = ["sekai-profile/jpeg-turbo"]
+animation-export = ["sekai-profile/animation-export"]
+bundled-freetype = ["sekai-profile/bundled-freetype"]
 
 [dependencies]
 sekai-profile = { path = "../sekai-profile", version = "0.8.0" }

@@ -1,4 +1,8 @@
 /target
+/bot_service.json
+/fonts/
+/atlases/
+/runtime/
 .cargo-docker/
 **/*.rs.bk
 *.pdb

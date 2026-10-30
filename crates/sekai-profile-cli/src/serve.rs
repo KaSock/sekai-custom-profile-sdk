@@ -137,6 +137,19 @@ fn session(
                 let result = handle_reload(renderer, &request, region);
                 write_result(output, id, result);
             }
+            "capabilities" => {
+                write_response(
+                    output,
+                    &json!({"id": id, "ok": true,
+                    "result": crate::bot_media::capabilities()}),
+                );
+            }
+            "render_profile_media" => {
+                let result = crate::bot_media::render_profile_media(
+                    renderer, assets, asset_urls, &request, region,
+                );
+                write_result(output, id, result);
+            }
             "render" => {
                 let result = handle_render(renderer, assets, asset_urls, &request);
                 write_result(output, id, result);

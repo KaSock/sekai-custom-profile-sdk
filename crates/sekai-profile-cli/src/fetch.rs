@@ -86,7 +86,17 @@ fn is_final_status(code: u16) -> bool {
 fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
     let mut last_err = String::new();
     for attempt in 0..MAX_ATTEMPTS {
-        match agent.get(url).call() {
+        let mut request = agent.get(url);
+        let local_bot_url = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
+            && url.contains("/internal/profile-renderer/");
+        if local_bot_url {
+            if let Ok(token) = std::env::var("SEKAI_PROFILE_ASSET_TOKEN") {
+                request = request.set("Authorization", &format!("Bearer {token}"));
+            }
+        }
+        match request.call() {
             Ok(resp) => {
                 let mut buf = Vec::new();
                 match resp.into_reader().read_to_end(&mut buf) {
@@ -123,6 +133,7 @@ pub fn load_masterdata_url(
 ) -> Result<usize, String> {
     let base = trim_base(masterdata_url);
     let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(30))
         .build();
     let mut loaded = 0;
@@ -174,6 +185,7 @@ pub fn load_assets_url(
     let static_base = static_url.map(|u| trim_base(u).to_string());
 
     let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(std::time::Duration::from_secs(30))
         .build();
 

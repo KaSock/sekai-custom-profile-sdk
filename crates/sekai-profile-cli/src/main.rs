@@ -6,6 +6,7 @@
 //! - `prepare` builds complete atlases for every font family and shape.
 //! - `serve` answers render requests read as NDJSON from stdin.
 
+mod bot_media;
 mod fetch;
 mod serve;
 mod static_manifest;
@@ -86,6 +87,9 @@ struct ResourceArgs {
     /// `game-assets` follows the game's asset bundle directories
     #[arg(long, value_enum, value_name = "LAYOUT", default_value_t = AssetUrlLayout::Flat)]
     asset_url_layout: AssetUrlLayout,
+    /// Encoded asset LRU budget in MiB (per process)
+    #[arg(long, default_value_t = 256)]
+    asset_cache_mb: usize,
 }
 
 #[derive(Args)]
@@ -302,7 +306,7 @@ impl Resources {
                 "master data tables are missing; elements that use them are not drawn"
             );
         }
-        let assets = Arc::new(AssetStore::new(1024));
+        let assets = Arc::new(AssetStore::new(resources.asset_cache_mb));
         if let Some(dir) = &resources.assets_dir {
             let count = assets.load_png_dir(dir)?;
             tracing::info!(count, dir = %dir.display(), "loaded assets");

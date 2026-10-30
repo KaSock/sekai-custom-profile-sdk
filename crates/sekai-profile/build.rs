@@ -20,12 +20,25 @@ fn main() {
     }
 
     if std::env::var_os("CARGO_FEATURE_ANIMATION_EXPORT").is_some() {
-        cc::Build::new()
-            .file("native/x264_encoder.c")
+        println!("cargo:rerun-if-env-changed=X264_INCLUDE_DIR");
+        println!("cargo:rerun-if-env-changed=X264_LIB_DIR");
+        println!("cargo:rerun-if-env-changed=X264_LIB_NAME");
+        let mut x264 = cc::Build::new();
+        if let Some(include) = std::env::var_os("X264_INCLUDE_DIR") {
+            x264.include(include);
+        }
+        if let Some(lib) = std::env::var_os("X264_LIB_DIR") {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                std::path::PathBuf::from(lib).display()
+            );
+        }
+        x264.file("native/x264_encoder.c")
             .warnings(true)
             .extra_warnings(true)
             .flag_if_supported("-Werror")
             .compile("allium_x264_encoder");
-        println!("cargo:rustc-link-lib=dylib=x264");
+        let name = std::env::var("X264_LIB_NAME").unwrap_or_else(|_| "x264".into());
+        println!("cargo:rustc-link-lib=dylib={name}");
     }
 }

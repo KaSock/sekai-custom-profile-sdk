@@ -1,0 +1,17 @@
+{
+  "executable": "target/release/sekai-profile.exe",
+  "bot_root": "D:/path/to/your/BOT",
+  "bot_url": "http://127.0.0.1:8080",
+  "font_dir": "fonts",
+  "atlas_dir": "atlases",
+  "token": "CHANGE_ME",
+  "source_url": "https://github.com/KaSock/sekai-custom-profile-sdk",
+  "regions": ["cn", "jp", "tw", "en"],
+  "port": 45557,
+  "max_concurrent_renders": 1,
+  "max_pending_requests": 8,
+  "render_timeout_seconds": 480,
+  "image_quality": 90,
+  "animation_preset": "qq-v2",
+  "asset_cache_mb": 256
+}
