@@ -20,7 +20,7 @@ const TMP_POINT_SIZE: f32 = 75.0;
 /// TextMesh Pro gradient scale: the atlas padding (5) plus one texel.
 const TMP_SPREAD: f32 = 6.0;
 
-const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
+const FONT_FILE_MAP: [(&str, &[&str]); 24] = [
     (
         "FZLanTingHei-DB-GBK",
         &["FOT-RodinNTLGPro-DB.ttf", "FOT-RodinNTLGPro-DB.otf"],
@@ -39,6 +39,11 @@ const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
     // rather than an SDF atlas.
     ("FOT-Omikuji", &["FOT-Omikuji.otf"]),
     ("FOT-UDMinchoPro-B", &["FOT-UDMinchoPro-B.otf"]),
+    ("FOT-BabyPopStd-EB", &["FOT-BabyPopStd-EB.otf"]),
+    ("FOT-GrecoStd-B", &["FOT-GrecoStd-B.otf"]),
+    ("FOT-HummingPro-B", &["FOT-HummingPro-B.otf"]),
+    ("FOT-LyraStd-DB", &["FOT-LyraStd-DB.otf"]),
+    ("FOT-PalRetronStd-B", &["FOT-PalRetronStd-B.otf"]),
     // Fallback faces of the omikuji slips' text: the system UI font and the
     // faces of the Noto Sans CJK collection.
     ("Roboto", &["Roboto-Regular.ttf"]),

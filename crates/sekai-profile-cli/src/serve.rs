@@ -193,7 +193,24 @@ fn handle_reload(
         .pointer("/params/dir")
         .and_then(|d| d.as_str())
         .ok_or("reload_masterdata needs params.dir")?;
-    let provider = JsonMasterDataProvider::from_dir(std::path::Path::new(dir))?.with_region(region);
+    let fallback_dir = request
+        .pointer("/params/fallback_dir")
+        .and_then(Value::as_str);
+    let fallback_tables = request
+        .pointer("/params/fallback_tables")
+        .and_then(Value::as_array)
+        .map(|tables| tables.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let provider = if let Some(fallback_dir) = fallback_dir {
+        JsonMasterDataProvider::from_dir_with_fallback(
+            std::path::Path::new(dir),
+            std::path::Path::new(fallback_dir),
+            &fallback_tables,
+        )?
+    } else {
+        JsonMasterDataProvider::from_dir(std::path::Path::new(dir))?
+    }
+    .with_region(region);
     let missing = provider.missing_tables();
     renderer.swap_masterdata(Arc::new(provider));
     Ok(json!({"reloaded": true, "missing_tables": missing}))

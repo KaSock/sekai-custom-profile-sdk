@@ -139,6 +139,30 @@ impl JsonMasterDataProvider {
         Ok(provider)
     }
 
+    /// Loads the primary region and fills only absent named tables from a
+    /// secondary directory. The secondary tables remain in memory only.
+    pub fn from_dir_with_fallback(
+        dir: &Path,
+        fallback_dir: &Path,
+        fallback_tables: &[&str],
+    ) -> Result<Self, String> {
+        let mut provider = Self::from_dir(dir)?;
+        for name in fallback_tables {
+            if provider.table(name).is_some() {
+                continue;
+            }
+            let path = fallback_dir.join(format!("{name}.json"));
+            if !path.exists() {
+                continue;
+            }
+            let json = std::fs::read_to_string(&path)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            provider.insert_table(name, &json)?;
+            tracing::info!(table = name, path = %path.display(), "loaded fallback masterdata table");
+        }
+        Ok(provider)
+    }
+
     /// Names of the loaded tables, in no particular order.
     pub fn loaded_tables(&self) -> Vec<&str> {
         self.tables.keys().map(|s| s.as_str()).collect()

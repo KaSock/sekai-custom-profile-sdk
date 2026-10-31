@@ -177,6 +177,56 @@ fn a_directory_without_the_icon_tables_is_not_missing_required_tables() {
 }
 
 #[test]
+fn fallback_directory_fills_only_missing_named_tables_in_memory() {
+    let primary = tempfile::tempdir().expect("primary dir");
+    let fallback = tempfile::tempdir().expect("fallback dir");
+    std::fs::write(primary.path().join("cards.json"), "[]").expect("write cards");
+    std::fs::write(
+        primary.path().join("customProfileMaterialResources.json"),
+        r#"[{"id":1,"fileName":"cn","resourceLoadVal":"custom_profile/material"}]"#,
+    )
+    .expect("write primary table");
+    std::fs::write(
+        fallback.path().join("customProfileMaterialResources.json"),
+        r#"[{"id":2,"fileName":"jp","resourceLoadVal":"custom_profile/material"}]"#,
+    )
+    .expect("write fallback table");
+    std::fs::write(
+        fallback
+            .path()
+            .join("customProfileCharacterIconResources.json"),
+        r#"[{"id":3,"fileName":"jp","resourceLoadVal":"custom_profile/character_icon"}]"#,
+    )
+    .expect("write other fallback table");
+
+    let provider = JsonMasterDataProvider::from_dir_with_fallback(
+        primary.path(),
+        fallback.path(),
+        &[
+            "customProfileMaterialResources",
+            "customProfileCharacterIconResources",
+        ],
+    )
+    .expect("provider");
+
+    assert!(provider
+        .table("customProfileMaterialResources")
+        .unwrap()
+        .by_id(1)
+        .is_some());
+    assert!(provider
+        .table("customProfileMaterialResources")
+        .unwrap()
+        .by_id(2)
+        .is_none());
+    assert!(provider
+        .table("customProfileCharacterIconResources")
+        .unwrap()
+        .by_id(3)
+        .is_some());
+}
+
+#[test]
 fn live_master_honor_falls_back_to_the_last_known_level() {
     // The game resolves a level the masterdata does not list yet to the
     // last known level instead of clearing the asset bundle name.

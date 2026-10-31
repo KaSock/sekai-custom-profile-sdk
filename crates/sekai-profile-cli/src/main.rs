@@ -286,7 +286,12 @@ struct Resources {
 impl Resources {
     fn load(masterdata: &MasterDataArgs, resources: &ResourceArgs) -> Result<Self, String> {
         if let Some(font_dir) = &resources.font_dir {
-            sekai_profile::set_font_dirs([font_dir]);
+            let region_dir = font_dir.join(masterdata.region.as_str());
+            if region_dir.is_dir() {
+                sekai_profile::set_font_dirs([region_dir, font_dir.clone()]);
+            } else {
+                sekai_profile::set_font_dirs([font_dir]);
+            }
         }
         let provider = match (&masterdata.masterdata, &masterdata.masterdata_url) {
             (Some(dir), _) => JsonMasterDataProvider::from_dir(dir)?,
@@ -399,17 +404,39 @@ pub(crate) fn fetch_assets(assets: &Arc<AssetStore>, urls: &serve::AssetUrls, ke
     let Some(url) = &urls.dynamic else {
         return;
     };
+    const DIAGNOSTIC_KEY: &str = "card/bg_base_wh";
+    let requested = keys.iter().any(|key| key == DIAGNOSTIC_KEY);
+    let cached_before = assets.contains(DIAGNOSTIC_KEY);
     let wanted: Vec<String> = keys
         .iter()
         .filter(|key| !assets.contains(key))
         .cloned()
         .collect();
+    tracing::info!(
+        key = DIAGNOSTIC_KEY,
+        requested,
+        cached_before,
+        scheduled = wanted.iter().any(|key| key == DIAGNOSTIC_KEY),
+        "profile renderer texture diagnostic before fetch"
+    );
     if wanted.is_empty() {
+        tracing::info!(
+            key = DIAGNOSTIC_KEY,
+            cached_after = assets.contains(DIAGNOSTIC_KEY),
+            decodable_after = assets.get_premultiplied_rgba(DIAGNOSTIC_KEY).is_some(),
+            "profile renderer texture diagnostic after fetch"
+        );
         return;
     }
     let (fetched, failed) =
         fetch::load_assets_url(assets, &wanted, url, urls.static_.as_deref(), urls.layout);
     tracing::info!(fetched, failed, "fetched assets");
+    tracing::info!(
+        key = DIAGNOSTIC_KEY,
+        cached_after = assets.contains(DIAGNOSTIC_KEY),
+        decodable_after = assets.get_premultiplied_rgba(DIAGNOSTIC_KEY).is_some(),
+        "profile renderer texture diagnostic after fetch"
+    );
 }
 
 /// Asset keys `card` and `profile` draw that the store lacks.
@@ -432,6 +459,50 @@ pub(crate) fn missing_asset_keys(
             &md,
             |key| store.contains(key),
         ));
+    }
+    // The standard card level bar is a General recipe texture. Keep this
+    // explicit fallback so an older or incomplete scene resolver cannot omit
+    // it from the fetch list.
+    if !store.contains("card/bg_base_wh") {
+        keys.push("card/bg_base_wh".to_owned());
+    }
+    // General panels lower into image commands whose resources are not part
+    // of the raw card/profile asset tables. Collect the actual resolved image
+    // resources so static frames, icons, masks, and future General sprites
+    // all use the same BOT asset endpoint without maintaining a name list.
+    match sekai_profile::semantic_resolve::resolve_card_commands_with_resources(
+        card,
+        &md,
+        "asset-keys",
+        profile,
+        md.region().as_str(),
+        sekai_profile::semantic_resolve::ResolveResourceContext {
+            assets: Some(store),
+            render_objects: None,
+            catalog_lookup_ns: None,
+        },
+    ) {
+        Ok(scene) => {
+            for command in scene.commands {
+                if let sekai_profile::core::SemanticCommandPayload::Image {
+                    resource,
+                    alpha_mask,
+                    ..
+                } = command.payload
+                {
+                    for resource in std::iter::once(resource).chain(alpha_mask) {
+                        if (resource.namespace == "assets" || resource.namespace == "static")
+                            && !store.contains(&resource.key)
+                        {
+                            keys.push(resource.key);
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve profile image resources");
+        }
     }
     keys.sort();
     keys.dedup();

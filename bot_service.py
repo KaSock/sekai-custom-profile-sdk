@@ -26,19 +26,43 @@ class Worker:
         self.stderr_task = None
         self.revision = None
         self.serial = 0
-        self.md_dir = Path(config['bot_root']).resolve() / 'data/sekai/assets/masterdata' / region
+        self.masterdata_root = Path(config['bot_root']).resolve() / 'data/sekai/assets/masterdata'
+        self.md_dir = self.masterdata_root / region
+        self.fallback_md_dir = self.masterdata_root / 'jp' if region != 'jp' else None
+
+    def masterdata_params(self):
+        params = {'dir': str(self.md_dir)}
+        if self.fallback_md_dir is not None:
+            params.update({
+                'fallback_dir': str(self.fallback_md_dir),
+                'fallback_tables': [
+                    'customProfileCharacterIconResources',
+                    'customProfileMaterialResources',
+                    'customProfileUserInterfaceIconResources',
+                ],
+            })
+        return params
 
     def signature(self):
-        return tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size)
-                     for p in sorted(self.md_dir.glob('*.json')))
+        dirs = [(self.region, self.md_dir)]
+        if self.fallback_md_dir is not None:
+            dirs.append(('jp', self.fallback_md_dir))
+        return tuple((f'{region}/{p.name}', p.stat().st_mtime_ns, p.stat().st_size)
+                     for region, directory in dirs for p in sorted(directory.glob('*.json')))
 
     def atlas_signature(self):
         digest = hashlib.sha256()
         for name in ('customProfileTextFonts', 'customProfileShapeResources'):
             digest.update((self.md_dir / f'{name}.json').read_bytes())
-        for path in sorted(Path(self.config['font_dir']).glob('*')):
-            if path.is_file():
-                digest.update(f'{path.name}:{path.stat().st_mtime_ns}:{path.stat().st_size}'.encode())
+        font_root = Path(self.config['font_dir'])
+        # Region-specific fonts take precedence over the shared directory.
+        for directory in (font_root / self.region, font_root):
+            if not directory.is_dir():
+                continue
+            digest.update(f'dir:{directory}'.encode())
+            for path in sorted(directory.rglob('*')):
+                if path.is_file():
+                    digest.update(f'{path.relative_to(font_root)}:{path.stat().st_mtime_ns}:{path.stat().st_size}'.encode())
         return digest.hexdigest()
 
     async def log_stderr(self, process):
@@ -98,7 +122,7 @@ class Worker:
         info = await self.request('capabilities')
         if not info.get('animation_export') or not info.get('jpeg'):
             raise RuntimeError('Renderer lacks animation-export; build the adapted version')
-        loaded = await self.request('reload_masterdata', {'dir': str(self.md_dir)})
+        loaded = await self.request('reload_masterdata', self.masterdata_params())
         if loaded.get('missing_tables'):
             raise RuntimeError(f'Missing masterdata: {loaded["missing_tables"]}')
         LOG.info('Started %s renderer (pid=%s)', self.region, self.process.pid)
@@ -148,7 +172,7 @@ class Worker:
             await self.close()
             await self.start()
         elif revision != self.revision:
-            result = await self.request('reload_masterdata', {'dir': str(self.md_dir)})
+            result = await self.request('reload_masterdata', self.masterdata_params())
             if result.get('missing_tables'):
                 raise RuntimeError(f'Missing masterdata: {result["missing_tables"]}')
             self.revision = revision

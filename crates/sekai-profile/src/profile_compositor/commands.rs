@@ -634,6 +634,30 @@ fn load_source_fallback_object(
     if resource.namespace != "assets" && resource.namespace != "static" {
         return Ok(None);
     }
+    let diagnostic = resource.namespace == "static" && resource.key == "card/bg_base_wh";
+    if diagnostic {
+        match assets.get(&resource.key) {
+            Some(encoded) => match crate::codec::png::decode(&encoded) {
+                Ok(image) => tracing::info!(
+                    key = %resource.key,
+                    bytes = encoded.len(),
+                    width = image.width,
+                    height = image.height,
+                    "profile renderer texture diagnostic at compositor"
+                ),
+                Err(error) => tracing::warn!(
+                    key = %resource.key,
+                    bytes = encoded.len(),
+                    %error,
+                    "profile renderer texture decode failed at compositor"
+                ),
+            },
+            None => tracing::warn!(
+                key = %resource.key,
+                "profile renderer texture absent from asset store at compositor"
+            ),
+        }
+    }
     let Some((width, height, pixels)) = assets.get_premultiplied_rgba(&resource.key) else {
         return Ok(None);
     };

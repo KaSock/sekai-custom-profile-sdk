@@ -96,22 +96,10 @@ pub fn render_profile_media(
             page.seq,
         );
         let result = (|| -> Result<Value, String> {
-            let needed = || {
-                if card
-                    .generals
-                    .iter()
-                    .any(|element| element.object_data.visible)
-                {
-                    crate::missing_asset_keys(renderer, card, Some(&profile), assets)
-                } else {
-                    sekai_profile::asset_keys::missing_card_asset_keys_with_profile(
-                        card,
-                        Some(&profile),
-                        &renderer.masterdata(),
-                        |key| assets.contains(key),
-                    )
-                }
-            };
+            // General/card overlay resources are resolved from the scene. This
+            // must also run for pages without a visible General element because
+            // the regular card recipe can still reference static textures.
+            let needed = || crate::missing_asset_keys(renderer, card, Some(&profile), assets);
             crate::fetch_assets(assets, urls, &needed());
             let missing = sekai_profile::asset_keys::missing_card_asset_keys_with_profile(
                 card,
