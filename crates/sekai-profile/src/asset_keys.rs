@@ -12,6 +12,9 @@ use sekai_profile_core::{masterdata::StandardHonorAssetPlan, ResourceKey};
 struct AssetRequirements {
     // Each group needs one available member. A singleton is an ordinary asset.
     groups: Vec<Vec<ResourceKey>>,
+    // These images are attempted and drawn when available, but BOT honor
+    // composition treats rank/progress overlays as optional.
+    optional: Vec<ResourceKey>,
 }
 
 impl AssetRequirements {
@@ -26,9 +29,14 @@ impl AssetRequirements {
         self.groups.push(vec![resource]);
     }
 
+    fn optional_resource(&mut self, resource: ResourceKey) {
+        self.optional.push(resource);
+    }
+
     fn honor(&mut self, plan: &StandardHonorAssetPlan) {
-        for key in std::iter::once(&plan.background).chain(plan.overlay.iter()) {
-            self.groups.push(vec![key.clone()]);
+        self.groups.push(vec![plan.background.clone()]);
+        if let Some(overlay) = &plan.overlay {
+            self.optional_resource(overlay.clone());
         }
         self.groups
             .push(plan.frame_candidates.iter().flatten().cloned().collect());
@@ -41,6 +49,7 @@ impl AssetRequirements {
         self.groups
             .into_iter()
             .flatten()
+            .chain(self.optional)
             .map(|resource| resource.key)
             .collect()
     }
@@ -94,7 +103,11 @@ impl RenderAssetPlan {
             {
                 for resource in std::iter::once(resource).chain(alpha_mask) {
                     if resource.namespace == "assets" || resource.namespace == "static" {
-                        required.resource(resource);
+                        if is_optional_honor_overlay(&resource.key) {
+                            required.optional_resource(resource);
+                        } else {
+                            required.resource(resource);
+                        }
                     }
                 }
             }
@@ -139,6 +152,15 @@ impl RenderAssetPlan {
     pub fn missing_keys(&self, available: impl FnMut(&str) -> bool) -> Vec<String> {
         self.required.missing(available)
     }
+}
+
+fn is_optional_honor_overlay(key: &str) -> bool {
+    (key.starts_with("honor/")
+        && ["/rank_main", "/rank_sub", "/scroll"]
+            .iter()
+            .any(|suffix| key.ends_with(suffix)))
+        || (key.starts_with("rank_live/honor/")
+            && (key.ends_with("/main") || key.ends_with("/sub")))
 }
 
 /// Collects possible asset keys, including alternatives that need not all exist.

@@ -210,17 +210,23 @@ pub fn effective_honor_background_asset_bundle_name<'a>(
 /// Returns whether a standard honor owns a rank/progress overlay layer.
 ///
 /// Live Master honors draw their scroll and rank-match honors their rank
-/// plate. Otherwise only event and SEKAI ECHO honors draw the `rank_main` /
-/// `rank_sub` art of their own bundle; other honor types never show it,
-/// whatever their bundle contains.
+/// plate. Event honors draw rank art only when their own bundle differs from
+/// the shared degree-background bundle. SEKAI ECHO honors use their own rank
+/// art; other honor types do not draw a rank overlay.
 pub fn honor_has_rank_overlay(
     honor_type: &str,
     asset_bundle_name: &str,
+    background_asset_bundle_name: Option<&str>,
     is_live_master: bool,
 ) -> bool {
     is_live_master
         || honor_type == "rank_match"
-        || (matches!(honor_type, "event" | "sekai_echo") && !asset_bundle_name.is_empty())
+        || (honor_type == "sekai_echo" && !asset_bundle_name.is_empty())
+        || (honor_type == "event"
+            && !asset_bundle_name.is_empty()
+            && background_asset_bundle_name
+                .filter(|name| !name.is_empty())
+                .is_some_and(|background| background != asset_bundle_name))
 }
 
 /// Number of level stars drawn for `level`. Levels 1 to 10 show that many
@@ -343,6 +349,7 @@ impl ResolvedHonor {
         honor_has_rank_overlay(
             &self.honor_type,
             &self.asset_bundle_name,
+            self.background_asset_bundle_name.as_deref(),
             self.is_live_master,
         )
     }
@@ -889,17 +896,30 @@ pub(crate) mod tests {
     #[test]
     fn rank_overlay_follows_the_honor_type() {
         let mut honor = planned_honor();
-        for (honor_type, bundle, expected) in [
-            ("event", "honor_0305", true),
-            ("event", "honor_top_000001", true),
-            ("sekai_echo", "honor_0182", true),
-            ("event", "", false),
-            ("limitevent", "honor_top_000020", false),
-            ("character", "honor_memorial_0001", false),
-            ("achievement", "honor_0105", false),
+        for (honor_type, bundle, background, expected) in [
+            ("event", "honor_0305", Some("honor_shared"), true),
+            (
+                "event",
+                "honor_bg_limited_gacha202601",
+                Some("honor_bg_limited_gacha202601"),
+                false,
+            ),
+            (
+                "event",
+                "honor_total_recharge_202604",
+                Some("honor_total_recharge_202604"),
+                false,
+            ),
+            ("event", "honor_0246", None, false),
+            ("sekai_echo", "honor_0182", None, true),
+            ("event", "", Some("honor_shared"), false),
+            ("limitevent", "honor_top_000020", None, false),
+            ("character", "honor_memorial_0001", None, false),
+            ("achievement", "honor_0105", None, false),
         ] {
             honor.honor_type = honor_type.into();
             honor.asset_bundle_name = bundle.into();
+            honor.background_asset_bundle_name = background.map(str::to_owned);
             assert_eq!(honor.has_rank_overlay(), expected, "{honor_type} {bundle}");
             let overlay = honor.asset_plan(1, true).overlay;
             assert_eq!(overlay.is_some(), expected, "{honor_type} {bundle}");
