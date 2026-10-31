@@ -78,16 +78,9 @@ pub fn render_profile_media(
     let mut items = Vec::new();
     let mut failures = Vec::new();
     let mut total_bytes = 0usize;
-    for raw_page in pages {
-        let page: UserCustomProfileCard = match serde_json::from_value(raw_page.clone()) {
-            Ok(page) => page,
-            Err(error) => {
-                failures.push(
-                    json!({"seq": raw_page.get("seq"), "error": format!("invalid page: {error}")}),
-                );
-                continue;
-            }
-        };
+    let render = |raw_page: &Value| -> Result<MediaPage, String> {
+        let page: UserCustomProfileCard = serde_json::from_value(raw_page.clone())
+            .map_err(|error| format!("invalid page: {error}"))?;
         let card = &page.custom_profile_card;
         let document_key = format!(
             "bot-{}-request{}-page{}",
@@ -95,77 +88,184 @@ pub fn render_profile_media(
             request.get("id").unwrap_or(&Value::Null),
             page.seq,
         );
-        let result = (|| -> Result<Value, String> {
-            // General/card overlay resources are resolved from the scene. This
-            // must also run for pages without a visible General element because
-            // the regular card recipe can still reference static textures.
-            let needed = || crate::missing_asset_keys(renderer, card, Some(&profile), assets);
-            crate::fetch_assets(assets, urls, &needed());
-            let missing = sekai_profile::asset_keys::missing_card_asset_keys_with_profile(
+        let plan = crate::asset_plan(renderer, card, Some(&profile), assets)?;
+        crate::fetch_assets(assets, urls, &plan.fetch_keys(|key| assets.contains(key)));
+        // Rebuild after fetching: optional frame choices and source dimensions
+        // can depend on the now-available assets. Check recipe images too.
+        let plan = crate::asset_plan(renderer, card, Some(&profile), assets)?;
+        let missing = plan.missing_keys(|key| assets.contains(key));
+        if !missing.is_empty() {
+            return Err(format!("missing assets: {}", missing.join(", ")));
+        }
+        let mut warnings = renderer.validate_card(card);
+        for key in plan.fetch_keys(|key| assets.contains(key)) {
+            tracing::warn!(seq = page.seq, %key, "optional profile asset candidate unavailable");
+            warnings.push(format!(
+                "optional profile asset candidate unavailable: {key}"
+            ));
+        }
+        let document = AnimationDocument {
+            key: &document_key,
+            region: region.as_str(),
+        };
+        let export = renderer
+            .render_animation(card, Some(&profile), document, &preset, &config)
+            .map_err(|error| error.to_string())?;
+        let (kind, mime, data) = if export.animated {
+            let encoded = export.encoded.ok_or("animated page has no artifact")?;
+            validate_magic(encoded.format, &encoded.data).map_err(|error| error.to_string())?;
+            ("video", "video/mp4", encoded.data)
+        } else {
+            let data = crate::render_page(
+                renderer,
                 card,
                 Some(&profile),
-                &renderer.masterdata(),
-                |key| assets.contains(key),
-            );
-            // A nominal success with blank artwork is not a successful render.
-            if !missing.is_empty() {
-                return Err(format!("missing assets: {}", missing.join(", ")));
-            }
-            let mut warnings = renderer.validate_card(card);
-            // The upstream profile helper includes every possible panel
-            // resource, even if this page does not draw that panel. Fetch
-            // these candidates, but do not fail an unrelated page for them.
-            for key in needed() {
-                tracing::warn!(seq = page.seq, %key, "profile panel asset unavailable");
-                warnings.push(format!("profile panel asset unavailable: {key}"));
-            }
-            let document = AnimationDocument {
-                key: &document_key,
-                region: region.as_str(),
-            };
-            let export = renderer
-                .render_animation(card, Some(&profile), document, &preset, &config)
-                .map_err(|error| error.to_string())?;
-            let (kind, mime, data) = if export.animated {
-                let encoded = export.encoded.ok_or("animated page has no artifact")?;
-                validate_magic(encoded.format, &encoded.data).map_err(|error| error.to_string())?;
-                ("video", "video/mp4", encoded.data)
-            } else {
-                let data = crate::render_page(
-                    renderer,
-                    card,
-                    Some(&profile),
-                    &config,
-                    crate::OutputFormat::Jpeg,
-                    quality,
-                )?;
-                ("image", "image/jpeg", data)
-            };
-            if total_bytes.saturating_add(data.len()) > 64 * 1024 * 1024 {
-                return Err("profile media exceeds the 64 MiB response budget".into());
-            }
-            total_bytes += data.len();
-            Ok(json!({
-                "seq": page.seq, "kind": kind, "content_type": mime,
-                "bytes": data.len(),
-                "data": base64::engine::general_purpose::STANDARD.encode(&data),
-                "warnings": warnings,
-            }))
-        })();
-        match result {
-            Ok(item) => items.push(item),
-            Err(error) => {
-                tracing::warn!(seq = page.seq, %error, "profile page export failed");
-                failures.push(json!({"seq": page.seq, "error": error}));
+                &config,
+                crate::OutputFormat::Jpeg,
+                quality,
+            )?;
+            ("image", "image/jpeg", data)
+        };
+        Ok(MediaPage {
+            kind,
+            mime,
+            data,
+            warnings,
+        })
+    };
+    // Bound live animation exporters and temporary artifacts. Assemble each
+    // wave in seq order so completion order cannot change the response budget.
+    for batch in pages.chunks(page_workers()) {
+        for (raw_page, result) in batch.iter().zip(render_parallel(batch, &render)) {
+            let seq = raw_page.get("seq");
+            let result = result.and_then(|page| {
+                if total_bytes.saturating_add(page.data.len()) > 64 * 1024 * 1024 {
+                    return Err("profile media exceeds the 64 MiB response budget".into());
+                }
+                total_bytes += page.data.len();
+                Ok(json!({
+                    "seq": seq, "kind": page.kind, "content_type": page.mime,
+                    "bytes": page.data.len(),
+                    "data": base64::engine::general_purpose::STANDARD.encode(&page.data),
+                    "warnings": page.warnings,
+                }))
+            });
+            match result {
+                Ok(item) => items.push(item),
+                Err(error) => {
+                    tracing::warn!(seq = ?seq, %error, "profile page export failed");
+                    failures.push(json!({"seq": seq, "error": error}));
+                }
             }
         }
     }
     Ok(json!({"items": items, "failures": failures}))
 }
 
+#[cfg(feature = "animation-export")]
+struct MediaPage {
+    kind: &'static str,
+    mime: &'static str,
+    data: Vec<u8>,
+    warnings: Vec<String>,
+}
+
+#[cfg(feature = "animation-export")]
+fn page_workers() -> usize {
+    std::env::var("SEKAI_PROFILE_PAGE_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|workers| (1..=16).contains(workers))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(4)
+        })
+}
+
+#[cfg(feature = "animation-export")]
+fn render_parallel<T: Sync, R: Send>(pages: &[T], render: &(impl Fn(&T) -> R + Sync)) -> Vec<R> {
+    std::thread::scope(|scope| {
+        let handles = pages
+            .iter()
+            .map(|page| scope.spawn(move || render(page)))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("profile page worker panicked"))
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "animation-export")]
+    #[test]
+    fn missing_overlay_texture_fails_before_rendering() {
+        let mut md = sekai_profile::masterdata::JsonMasterDataProvider::empty();
+        md.insert_table("cards", r#"[{"id":7,"assetbundleName":"fixture","cardRarityType":"rarity_4","attr":"cute","characterId":1}]"#).unwrap();
+        let assets = Arc::new(AssetStore::new(1));
+        let renderer = CustomProfileRenderer::new(Arc::new(md)).with_assets(Arc::clone(&assets));
+        let raw_card = json!({"cardMembers": [{
+            "objectData": {
+                "layer": 0, "lock": false, "visible": true,
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": {"x": 1.0, "y": 1.0, "z": 1.0}
+            },
+            "id": 7, "type": 1, "showMasterRank": true
+        }]});
+        let card = serde_json::from_value(raw_card.clone()).unwrap();
+        let plan = crate::asset_plan(&renderer, &card, None, &assets).unwrap();
+        let png = sekai_profile::codec::png::encode_rgba(1, 1, &[255; 4]).unwrap();
+        for key in plan.fetch_keys(|key| key == "card/bg_base_wh") {
+            assets.put(key, png.clone());
+        }
+        let result = render_profile_media(
+            &renderer,
+            &assets,
+            &AssetUrls::default(),
+            &json!({"params": {"profile": {"userCustomProfileCards": [{
+                "seq": 1, "customProfileId": 1, "customProfileCardId": 1,
+                "customProfileCard": raw_card
+            }]}}}),
+            Region::Cn,
+        )
+        .unwrap();
+        assert!(result["items"].as_array().unwrap().is_empty());
+        assert_eq!(
+            result["failures"][0]["error"],
+            "missing assets: card/bg_base_wh"
+        );
+    }
+
+    #[cfg(feature = "animation-export")]
+    #[test]
+    fn pages_execute_concurrently_and_keep_results_in_input_order() {
+        let barrier = std::sync::Barrier::new(4);
+        let completed = std::sync::atomic::AtomicUsize::new(0);
+        let results = render_parallel(&[1, 2, 3, 4], &|seq| {
+            // All workers must start before any can finish: serial execution
+            // cannot satisfy this barrier.
+            barrier.wait();
+            if *seq == 1 {
+                while completed.load(std::sync::atomic::Ordering::Acquire) != 3 {
+                    std::thread::yield_now();
+                }
+            } else {
+                completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+            if *seq == 2 {
+                Err("bad page")
+            } else {
+                Ok(*seq)
+            }
+        });
+        assert_eq!(results, [Ok(1), Err("bad page"), Ok(3), Ok(4)]);
+    }
 
     #[cfg(all(feature = "animation-export", feature = "jpeg-turbo"))]
     #[test]

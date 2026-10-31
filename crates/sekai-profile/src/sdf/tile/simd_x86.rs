@@ -59,11 +59,27 @@ pub(super) unsafe fn execute(
             actual: output.len(),
         });
     }
+    execute_rows(plan, atlas, destination, output, accumulation, 0)
+}
+
+/// # Safety
+/// The CPU must support AVX-512F/BW/VBMI and FMA. `output` must contain
+/// complete tile rows starting at tile-aligned `first_y`, clipped only at the
+/// canvas bottom. Both callers validate the full buffer before splitting it.
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
+pub(super) unsafe fn execute_rows(
+    plan: &SdfTilePlan,
+    atlas: &impl SdfAtlasSource,
+    destination: SdfDestination,
+    output: &mut [u8],
+    accumulation: SdfAccumulationMode,
+    first_y: u32,
+) -> Result<SdfExecutionStats, SdfTileError> {
     if destination == SdfDestination::LoadExisting
         && accumulation == SdfAccumulationMode::F32Tile
         && plan.direct_axis_shape_spans().is_some()
     {
-        return execute_axis_shape_direct_over(plan, output);
+        return execute_axis_shape_direct_over(plan, output, first_y);
     }
     if let SdfDestination::Clear(clear) = destination {
         for pixel in output.as_chunks_mut::<4>().0 {
@@ -88,10 +104,11 @@ pub(super) unsafe fn execute(
     ];
     let mut stats = SdfExecutionStats::default();
     let tiles_x = plan.grid.tiles_x();
-    let tile_count =
-        u32::try_from(plan.tile_offsets.len() - 1).map_err(|_| SdfTileError::SizeOverflow)?;
+    let rows = output.len() / (plan.grid.canvas_width as usize * 4);
+    let first_tile = first_y / u32::from(plan.grid.tile_height) * tiles_x;
+    let end_tile = (first_y + rows as u32).div_ceil(u32::from(plan.grid.tile_height)) * tiles_x;
 
-    for tile_index in 0..tile_count {
+    for tile_index in first_tile..end_tile {
         let spans = plan
             .spans_for_tile(tile_index)
             .ok_or(SdfTileError::CorruptPlan)?;
@@ -110,7 +127,7 @@ pub(super) unsafe fn execute(
             valid_width: valid_width as usize,
             valid_height: valid_height as usize,
             origin_x: origin_x as usize,
-            origin_y: origin_y as usize,
+            origin_y: (origin_y - first_y) as usize,
             canvas_width: plan.grid.canvas_width as usize,
         };
         match destination {
@@ -302,32 +319,34 @@ unsafe fn blend_constant_span(
 ///
 /// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
 ///
-/// `output` must be at least `canvas_width * canvas_height * 4` bytes for the
-/// plan's grid. The offsets are computed as
-/// `(span.y * canvas_width + span.x0) * 4`, so every span of
-/// `plan.direct_axis_shape_spans()` must also satisfy `span.y < canvas_height`
-/// and `span.x1 <= canvas_width`; the spans are built by
-/// `SdfTilePlan::prepare_direct_axis_shape`, which clips them to the canvas.
-/// `execute` is the only caller and checks the output length before dispatching
-/// here.
+/// `output` contains complete canvas rows starting at `first_y`. Selected
+/// spans are clipped to those rows and use offsets relative to `first_y`.
+/// Their x coordinates must stay within `canvas_width`; the spans are built
+/// in row order by `SdfTilePlan::prepare_direct_axis_shape`, which clips them
+/// to the canvas. `execute_rows` is the only caller and receives bands split
+/// from a length-validated output buffer.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn execute_axis_shape_direct_over(
     plan: &SdfTilePlan,
     output: &mut [u8],
+    first_y: u32,
 ) -> Result<SdfExecutionStats, SdfTileError> {
     let spans = plan
         .direct_axis_shape_spans()
         .ok_or(SdfTileError::CorruptPlan)?;
     let mut stats = SdfExecutionStats {
-        direct_output_run_count: 1,
+        direct_output_run_count: u64::from(first_y == 0),
         ..SdfExecutionStats::default()
     };
-    for span in spans {
+    let end_y = first_y + (output.len() / (plan.grid.canvas_width as usize * 4)) as u32;
+    let first_span = spans.partition_point(|span| span.y < first_y);
+    let end_span = spans.partition_point(|span| span.y < end_y);
+    for span in &spans[first_span..end_span] {
         let fragments = u64::from(span.x1 - span.x0);
         let packets = fragments.div_ceil(LANES as u64);
         blend_output_constant_span_rgba8(
             output,
-            (span.y as usize * plan.grid.canvas_width as usize + span.x0 as usize) * 4,
+            ((span.y - first_y) as usize * plan.grid.canvas_width as usize + span.x0 as usize) * 4,
             (span.x1 - span.x0) as usize,
             span.source,
         );
@@ -406,9 +425,9 @@ unsafe fn blend_output_constant_span_rgba8(
 /// Placement of one tile in the RGBA8 canvas, in pixels.
 ///
 /// The tile's channel vectors are row-major with a stride of `tile_width`. Its
-/// top-left pixel is canvas pixel `(origin_x, origin_y)`, and its leading
-/// `valid_width x valid_height` block is the part that lies inside a canvas
-/// `canvas_width` pixels wide.
+/// top-left pixel in the destination band is `(origin_x, origin_y)`, and its
+/// leading `valid_width x valid_height` block lies inside that band, whose
+/// stride is `canvas_width` pixels.
 #[derive(Clone, Copy)]
 struct TileWindow {
     tile_width: usize,
@@ -423,7 +442,7 @@ struct TileWindow {
 ///
 /// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
 ///
-/// `execute` is the only caller and builds `window` from a tile clipped to the
+/// `execute_rows` is the only caller and builds `window` from a tile clipped to the
 /// canvas, so `window.valid_width <= window.tile_width` and
 /// `window.valid_height <= tile_height` must hold. The read window of
 /// `window.valid_width x window.valid_height` pixels at
@@ -474,7 +493,7 @@ unsafe fn load_existing_tile_rgba8(tile: &mut [Vec<f32>; 4], window: TileWindow,
 /// `row < tile_height` and `x1 <= window.tile_width` for the four `tile`
 /// channel vectors, and `(window.origin_y + row) * window.canvas_width +
 /// window.origin_x + x1` must not exceed `canvas_width * canvas_height`.
-/// `execute` calls this through the `write_span` closure with tile-relative
+/// `execute_rows` calls this through the `write_span` closure with tile-relative
 /// rows and columns taken from the plan spans, which `SdfTilePlan` clips to the
 /// tile and canvas.
 #[target_feature(enable = "avx512f,avx512bw")]

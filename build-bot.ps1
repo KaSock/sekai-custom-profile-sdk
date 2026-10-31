@@ -32,7 +32,7 @@ $env:VCPKGRS_DYNAMIC = '1'
 $env:PATH = (Join-Path $installed 'bin') + [IO.Path]::PathSeparator + $env:PATH
 Push-Location $root
 try {
-    & cargo build --locked --release -p sekai-profile-cli --features animation-export
+    & cargo build --locked --release -p sekai-profile-cli --features "animation-export,sekai-profile/parallel"
     if ($LASTEXITCODE -ne 0) { throw 'Renderer build failed' }
     if ($Test) {
         & cargo test --locked -p sekai-profile-cli --features animation-export

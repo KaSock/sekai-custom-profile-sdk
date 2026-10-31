@@ -7,6 +7,7 @@
 mod atlas_source;
 mod command;
 mod execute;
+mod native_execute;
 mod plan;
 mod shape_program;
 #[cfg(target_arch = "x86_64")]
@@ -51,7 +52,7 @@ pub enum SdfAccumulationMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SdfDestination {
+pub(crate) enum SdfDestination {
     Clear([u8; 4]),
     LoadExisting,
 }
@@ -388,3 +389,50 @@ pub enum SdfTileError {
 
 #[cfg(test)]
 mod tests;
+
+impl SdfExecutionStats {
+    pub(crate) fn accumulate(&mut self, value: Self) {
+        self.shaded_fragment_count = self
+            .shaded_fragment_count
+            .saturating_add(value.shaded_fragment_count);
+        self.text_shaded_fragment_count = self
+            .text_shaded_fragment_count
+            .saturating_add(value.text_shaded_fragment_count);
+        self.shape_shaded_fragment_count = self
+            .shape_shaded_fragment_count
+            .saturating_add(value.shape_shaded_fragment_count);
+        self.sampled_texel_count = self
+            .sampled_texel_count
+            .saturating_add(value.sampled_texel_count);
+        self.blended_fragment_count = self
+            .blended_fragment_count
+            .saturating_add(value.blended_fragment_count);
+        self.text_blended_fragment_count = self
+            .text_blended_fragment_count
+            .saturating_add(value.text_blended_fragment_count);
+        self.shape_blended_fragment_count = self
+            .shape_blended_fragment_count
+            .saturating_add(value.shape_blended_fragment_count);
+        self.simd_packet_count = self
+            .simd_packet_count
+            .saturating_add(value.simd_packet_count);
+        self.swizzled_packet_count = self
+            .swizzled_packet_count
+            .saturating_add(value.swizzled_packet_count);
+        self.gather_fallback_packet_count = self
+            .gather_fallback_packet_count
+            .saturating_add(value.gather_fallback_packet_count);
+        self.precomputed_shape_fragment_count = self
+            .precomputed_shape_fragment_count
+            .saturating_add(value.precomputed_shape_fragment_count);
+        self.precomputed_shape_span_count = self
+            .precomputed_shape_span_count
+            .saturating_add(value.precomputed_shape_span_count);
+        self.direct_output_run_count = self
+            .direct_output_run_count
+            .saturating_add(value.direct_output_run_count);
+        self.direct_output_packet_count = self
+            .direct_output_packet_count
+            .saturating_add(value.direct_output_packet_count);
+    }
+}

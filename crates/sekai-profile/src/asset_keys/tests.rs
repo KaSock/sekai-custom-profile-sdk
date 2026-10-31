@@ -2,6 +2,122 @@ use super::{key_to_s3_path, logical_path_to_asset_key};
 
 const PREFIX: &str = "assets/cn/";
 
+fn render_plan_masterdata() -> crate::masterdata::MasterData {
+    let mut provider = crate::masterdata::JsonMasterDataProvider::empty();
+    provider.insert_table("cards", r#"[{"id":7,"assetbundleName":"fixture","cardRarityType":"rarity_4","attr":"cute","characterId":1}]"#).expect("cards");
+    provider
+        .insert_table(
+            "customProfileTextFonts",
+            r#"[{"id":1,"fontName":"fixture","name":"fixture"}]"#,
+        )
+        .expect("fonts");
+    crate::masterdata::MasterData::new(std::sync::Arc::new(provider))
+}
+
+fn plan_object() -> serde_json::Value {
+    serde_json::json!({
+        "layer": 0, "lock": false, "visible": true,
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+        "scale": {"x": 1.0, "y": 1.0, "z": 1.0}
+    })
+}
+
+#[test]
+fn cropped_card_overlay_plans_its_textures_without_a_general_panel() {
+    let md = render_plan_masterdata();
+    let assets = crate::assets::AssetStore::new(1);
+    let mut card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+        "cardMembers": [{"objectData": plan_object(), "id": 7, "type": 1, "showMasterRank": true}]
+    }))
+    .expect("card");
+    let key = "card/bg_base_wh";
+    let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).expect("plan");
+    let keys = plan.fetch_keys(|_| false);
+    assert!(keys.iter().any(|key| key == "card/bg_base_wh"));
+    assert!(keys.iter().any(|key| key == "card/cardFrame_M_4"));
+    assert!(keys.iter().any(|key| key == "card/icon_attribute_cute_64"));
+    let png = crate::codec::png::encode_rgba(1, 1, &[255; 4]).expect("PNG");
+    for candidate in keys.iter().filter(|candidate| candidate.as_str() != key) {
+        assets.put(candidate.clone(), png.clone());
+    }
+    let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).expect("updated plan");
+    assert_eq!(plan.missing_keys(|key| assets.contains(key)), [key]);
+    assets.put(key.into(), png);
+    assert!(plan.missing_keys(|key| assets.contains(key)).is_empty());
+
+    card.card_members[0].show_master_rank = Some(false);
+    let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).expect("image-only plan");
+    assert!(!plan
+        .fetch_keys(|_| false)
+        .iter()
+        .any(|candidate| candidate == key));
+    card.card_members[0].show_master_rank = Some(true);
+    card.card_members[0].object_data.visible = false;
+    let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).expect("hidden plan");
+    assert!(plan.fetch_keys(|_| false).is_empty());
+}
+
+#[test]
+fn general_deck_uses_the_same_overlay_resource_plan() {
+    let md = render_plan_masterdata();
+    let assets = crate::assets::AssetStore::new(1);
+    let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+        "generals": [{"objectData": plan_object(), "type": 3}]
+    }))
+    .expect("card");
+    let profile = crate::profile::ProfileData {
+        deck_members: vec![crate::profile::DeckMember {
+            card_id: 7,
+            level: 60,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let plan = super::RenderAssetPlan::build(&card, Some(&profile), &md, &assets).expect("plan");
+    assert!(plan
+        .fetch_keys(|_| false)
+        .iter()
+        .any(|key| key == "card/bg_base_wh"));
+    assert_eq!(
+        plan.missing_keys(|key| key != "card/bg_base_wh"),
+        ["card/bg_base_wh"]
+    );
+    // Profile helper candidates for panels absent from this page remain optional.
+    assert!(plan
+        .missing_keys(|key| key != "sprite/icon/icon_playerRank")
+        .is_empty());
+}
+
+#[test]
+fn empty_pages_do_not_request_overlay_or_unused_profile_textures() {
+    let md = render_plan_masterdata();
+    let assets = crate::assets::AssetStore::new(1);
+    let card: crate::types::CustomProfileCard =
+        serde_json::from_value(serde_json::json!({})).expect("card");
+    let profile = crate::profile::ProfileData::default();
+    let plan = super::RenderAssetPlan::build(&card, Some(&profile), &md, &assets).expect("plan");
+    assert!(plan.fetch_keys(|_| false).is_empty());
+    assert!(plan.missing_keys(|_| false).is_empty());
+}
+
+#[test]
+fn resource_planning_reports_scene_errors() {
+    let md = crate::masterdata::MasterData::new(std::sync::Arc::new(
+        crate::masterdata::JsonMasterDataProvider::empty(),
+    ));
+    let assets = crate::assets::AssetStore::new(1);
+    let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+        "generals": [{"objectData": plan_object(), "type": 3}]
+    }))
+    .expect("card");
+    let profile = crate::profile::ProfileData::default();
+    assert!(matches!(
+        super::RenderAssetPlan::build(&card, Some(&profile), &md, &assets),
+        Err(crate::semantic_resolve::ResolveError::MissingRegionFont(1))
+    ));
+}
+
 #[test]
 fn game_assets_resolve_under_the_prefix() {
     assert_eq!(

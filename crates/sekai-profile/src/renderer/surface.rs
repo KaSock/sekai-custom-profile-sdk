@@ -776,20 +776,20 @@ fn flush_full_card_sdf_run(
     }
     let execution_plan = visible_plan.as_ref().unwrap_or(&plan);
     let execute_started = std::time::Instant::now();
-    let execution = match executor {
-        Executor::Scalar => execution_plan
-            .execute_scalar_f32_over(&execution_source, pixels)
-            .map_err(|error| format!("full-card scalar SDF execute: {error}"))?,
-        Executor::Simd => execution_plan
-            .execute_simd_f32_over(&execution_source, pixels)
-            .map_err(|error| format!("full-card SIMD SDF execute: {error}"))?,
-    };
+    let execution = execution_plan
+        .execute_native_f32(
+            &execution_source,
+            executor,
+            crate::sdf::tile::SdfDestination::LoadExisting,
+            pixels,
+        )
+        .map_err(|error| format!("full-card SDF execute: {error}"))?;
     aggregate.timings.execute_ns = aggregate
         .timings
         .execute_ns
         .saturating_add(elapsed_ns(execute_started));
     add_sdf_plan_stats(&mut aggregate.plan_stats, plan.stats());
-    add_sdf_execution_stats(&mut aggregate.execution_stats, execution);
+    aggregate.execution_stats.accumulate(execution);
     aggregate.plan_bytes = aggregate.plan_bytes.saturating_add(plan.resident_bytes());
     aggregate.span_bytes = aggregate.span_bytes.saturating_add(plan.span_bytes());
     if let Some(visible_plan) = visible_plan.as_ref() {
@@ -834,52 +834,4 @@ fn add_sdf_plan_stats(
     total.shape_covered_fragment_count = total
         .shape_covered_fragment_count
         .saturating_add(value.shape_covered_fragment_count);
-}
-
-fn add_sdf_execution_stats(
-    total: &mut crate::sdf::tile::SdfExecutionStats,
-    value: crate::sdf::tile::SdfExecutionStats,
-) {
-    total.shaded_fragment_count = total
-        .shaded_fragment_count
-        .saturating_add(value.shaded_fragment_count);
-    total.text_shaded_fragment_count = total
-        .text_shaded_fragment_count
-        .saturating_add(value.text_shaded_fragment_count);
-    total.shape_shaded_fragment_count = total
-        .shape_shaded_fragment_count
-        .saturating_add(value.shape_shaded_fragment_count);
-    total.sampled_texel_count = total
-        .sampled_texel_count
-        .saturating_add(value.sampled_texel_count);
-    total.blended_fragment_count = total
-        .blended_fragment_count
-        .saturating_add(value.blended_fragment_count);
-    total.text_blended_fragment_count = total
-        .text_blended_fragment_count
-        .saturating_add(value.text_blended_fragment_count);
-    total.shape_blended_fragment_count = total
-        .shape_blended_fragment_count
-        .saturating_add(value.shape_blended_fragment_count);
-    total.simd_packet_count = total
-        .simd_packet_count
-        .saturating_add(value.simd_packet_count);
-    total.swizzled_packet_count = total
-        .swizzled_packet_count
-        .saturating_add(value.swizzled_packet_count);
-    total.gather_fallback_packet_count = total
-        .gather_fallback_packet_count
-        .saturating_add(value.gather_fallback_packet_count);
-    total.precomputed_shape_fragment_count = total
-        .precomputed_shape_fragment_count
-        .saturating_add(value.precomputed_shape_fragment_count);
-    total.precomputed_shape_span_count = total
-        .precomputed_shape_span_count
-        .saturating_add(value.precomputed_shape_span_count);
-    total.direct_output_run_count = total
-        .direct_output_run_count
-        .saturating_add(value.direct_output_run_count);
-    total.direct_output_packet_count = total
-        .direct_output_packet_count
-        .saturating_add(value.direct_output_packet_count);
 }

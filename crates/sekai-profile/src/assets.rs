@@ -200,7 +200,13 @@ impl AssetStore {
             );
             return None;
         }
-        let decoded = crate::codec::png::decode(&encoded).ok()?;
+        let decoded = match crate::codec::png::decode(&encoded) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                tracing::warn!(asset_key = key, bytes = encoded.len(), %error, "asset PNG decode failed");
+                return None;
+            }
+        };
         let mut pixels = decoded.pixels;
         for pixel in pixels.as_chunks_mut::<4>().0 {
             let alpha = pixel[3];

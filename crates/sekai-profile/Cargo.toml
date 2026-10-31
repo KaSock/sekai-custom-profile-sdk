@@ -42,7 +42,7 @@ tempfile = "3"
 features = ["jpeg-turbo"]
 
 [features]
-default = []
+default = ["parallel"]
 # Bundled FreeType C sources for hosts without pkg-config.
 bundled-freetype = ["freetype-rs/bundled"]
 # Vendored libjpeg-turbo and its raw-YUV 4:2:0 encoder, selected through

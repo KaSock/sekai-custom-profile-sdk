@@ -221,6 +221,111 @@ fn rectangle(x0: f32, y0: f32, x1: f32, y1: f32) -> [Point2; 4] {
 }
 
 #[test]
+fn native_raster_matches_serial_pixels_and_stats_across_tile_bands() {
+    use crate::render_config::Executor;
+
+    let atlas = PhysicalMixedAtlas {
+        text: [192; 64],
+        shape: [255; 128],
+    };
+    let shape = SdfDrawCommand {
+        kind: SdfPrimitiveKind::Shape,
+        atlas_set: 1,
+        material: SdfCommandMaterial::Shape(ShapeSdfMaterial::from_profile_values(
+            [0.1, 0.6, 0.3],
+            0.55,
+            [0.8, 0.2, 0.5],
+            0.4,
+            0.25,
+        )),
+        ..command([1.0; 4], rectangle(2.0, 11.0, 70.0, 47.0))
+    };
+    let mixed = [
+        command([0.7, 0.1, 0.3, 0.6], rectangle(0.0, 1.0, 72.0, 35.0)),
+        shape,
+        command([0.1, 0.8, 0.3, 0.4], rectangle(8.0, 15.0, 50.0, 40.0)),
+    ];
+    for (tile_width, tile_height) in [(8, 16), (32, 32), (128, 8)] {
+        let grid = TileGrid {
+            canvas_width: 73,
+            canvas_height: 51,
+            tile_width,
+            tile_height,
+        };
+        for commands in [&mixed[..], std::slice::from_ref(&shape), &[]] {
+            // Exercise regular text/shape plans, static row programs and the
+            // deferred animation path that samples each source window directly.
+            let plans = [
+                SdfTilePlan::build(grid, commands, &atlas).expect("regular plan"),
+                SdfTilePlan::build_static_one_shot_with_shape_program_cache(
+                    grid,
+                    commands,
+                    &atlas,
+                    &ShapeRowProgramCache::default(),
+                )
+                .expect("static plan"),
+                SdfTilePlan::build_for_one_shot_dynamic_layer(grid, commands, &atlas)
+                    .expect("dynamic plan"),
+            ];
+            for plan in plans {
+                for executor in [Executor::Scalar, Executor::Simd] {
+                    if executor == Executor::Simd && !crate::sdf_simd_available() {
+                        continue;
+                    }
+                    for destination in [
+                        SdfDestination::Clear([13, 19, 29, 191]),
+                        SdfDestination::LoadExisting,
+                    ] {
+                        let mut serial = [17, 31, 47, 191].repeat(73 * 51);
+                        let mut parallel = serial.clone();
+                        let expected = match (executor, destination) {
+                            (Executor::Scalar, SdfDestination::Clear(clear)) => {
+                                plan.execute_scalar_f32(&atlas, clear, &mut serial)
+                            }
+                            (Executor::Scalar, SdfDestination::LoadExisting) => {
+                                plan.execute_scalar_f32_over(&atlas, &mut serial)
+                            }
+                            (Executor::Simd, SdfDestination::Clear(clear)) => plan.execute_simd(
+                                &atlas,
+                                clear,
+                                &mut serial,
+                                SdfAccumulationMode::F32Tile,
+                            ),
+                            (Executor::Simd, SdfDestination::LoadExisting) => {
+                                plan.execute_simd_f32_over(&atlas, &mut serial)
+                            }
+                        }
+                        .expect("serial execution");
+                        let actual = plan
+                            .execute_native_f32(&atlas, executor, destination, &mut parallel)
+                            .expect("native execution");
+                        assert_eq!(parallel, serial, "{executor:?} {destination:?} {grid:?}");
+                        assert_eq!(actual, expected, "execution statistics");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_raster_rejects_invalid_output_before_writing() {
+    let atlas = solid_atlas(255);
+    let plan = SdfTilePlan::build(TileGrid::new(73, 51), &[], &atlas).expect("plan");
+    let mut output = vec![17; 73 * 51 * 4 - 1];
+    assert!(matches!(
+        plan.execute_native_f32(
+            &atlas,
+            crate::render_config::Executor::Scalar,
+            SdfDestination::Clear([0; 4]),
+            &mut output,
+        ),
+        Err(SdfTileError::OutputLength { .. })
+    ));
+    assert!(output.iter().all(|byte| *byte == 17));
+}
+
+#[test]
 fn plan_is_variable_sized_and_preserves_command_order_per_tile() {
     let atlas = solid_atlas(255);
     let commands = [

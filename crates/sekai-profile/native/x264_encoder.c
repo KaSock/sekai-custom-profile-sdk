@@ -64,8 +64,8 @@ allium_x264_encoder *allium_x264_create(int width, int height, int fps, int qp) 
     param.i_timebase_num = 1;
     param.i_timebase_den = fps;
     param.b_vfr_input = 0;
-    param.i_threads = 1;
-    param.b_sliced_threads = 0;
+    param.i_threads = 16;
+    param.b_sliced_threads = 1;
     param.i_sync_lookahead = 0;
     param.rc.i_lookahead = 0;
     param.i_bframe = 0;

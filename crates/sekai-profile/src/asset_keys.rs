@@ -58,6 +58,89 @@ impl AssetRequirements {
     }
 }
 
+/// Image dependencies of one page, including images produced by shared
+/// recipes (General panels, card overlays and alpha masks).
+///
+/// Build before fetching, then rebuild against the updated store: optional
+/// honor frames and image dimensions can depend on the available assets.
+/// Scene errors are returned rather than silently dropping recipe resources.
+pub struct RenderAssetPlan {
+    required: AssetRequirements,
+    candidates: Vec<String>,
+}
+
+impl RenderAssetPlan {
+    pub fn build(
+        card: &CustomProfileCard,
+        profile: Option<&ProfileData>,
+        md: &MasterData,
+        assets: &crate::assets::AssetStore,
+    ) -> Result<Self, crate::semantic_resolve::ResolveError> {
+        let scene = crate::semantic_resolve::resolve_card_commands_with_profile(
+            card,
+            md,
+            "asset-plan",
+            profile,
+            md.region().as_str(),
+            Some(assets),
+        )?;
+        let mut required = card_asset_requirements(card, profile, md);
+        for command in scene.commands {
+            if let sekai_profile_core::SemanticCommandPayload::Image {
+                resource,
+                alpha_mask,
+                ..
+            } = command.payload
+            {
+                for resource in std::iter::once(resource).chain(alpha_mask) {
+                    if resource.namespace == "assets" || resource.namespace == "static" {
+                        required.resource(resource);
+                    }
+                }
+            }
+        }
+        // Profile helpers include alternatives and resources for panels the
+        // page may not show. They are fetch candidates, never unconditional
+        // requirements. Pages without General panels need none of them.
+        let mut candidates = required
+            .groups
+            .iter()
+            .flatten()
+            .map(|resource| resource.key.clone())
+            .collect::<Vec<_>>();
+        if card
+            .generals
+            .iter()
+            .any(|general| general.object_data.visible)
+        {
+            if let Some(profile) = profile {
+                candidates.extend(profile_asset_requirements(profile, md).keys());
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        Ok(Self {
+            required,
+            candidates,
+        })
+    }
+
+    /// Missing download candidates, including resource alternatives.
+    pub fn fetch_keys(&self, mut available: impl FnMut(&str) -> bool) -> Vec<String> {
+        self.candidates
+            .iter()
+            .filter(|key| !available(key))
+            .cloned()
+            .collect()
+    }
+
+    /// Missing required images; an available honor-frame fallback satisfies
+    /// its alternative group. Unused profile candidates do not fail a page.
+    pub fn missing_keys(&self, available: impl FnMut(&str) -> bool) -> Vec<String> {
+        self.required.missing(available)
+    }
+}
+
 /// Collects possible asset keys, including alternatives that need not all exist.
 pub fn collect_card_asset_keys(card: &CustomProfileCard, md: &MasterData) -> Vec<String> {
     card_asset_requirements(card, None, md).keys()

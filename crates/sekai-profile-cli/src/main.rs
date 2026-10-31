@@ -404,109 +404,28 @@ pub(crate) fn fetch_assets(assets: &Arc<AssetStore>, urls: &serve::AssetUrls, ke
     let Some(url) = &urls.dynamic else {
         return;
     };
-    const DIAGNOSTIC_KEY: &str = "card/bg_base_wh";
-    let requested = keys.iter().any(|key| key == DIAGNOSTIC_KEY);
-    let cached_before = assets.contains(DIAGNOSTIC_KEY);
     let wanted: Vec<String> = keys
         .iter()
         .filter(|key| !assets.contains(key))
         .cloned()
         .collect();
-    tracing::info!(
-        key = DIAGNOSTIC_KEY,
-        requested,
-        cached_before,
-        scheduled = wanted.iter().any(|key| key == DIAGNOSTIC_KEY),
-        "profile renderer texture diagnostic before fetch"
-    );
     if wanted.is_empty() {
-        tracing::info!(
-            key = DIAGNOSTIC_KEY,
-            cached_after = assets.contains(DIAGNOSTIC_KEY),
-            decodable_after = assets.get_premultiplied_rgba(DIAGNOSTIC_KEY).is_some(),
-            "profile renderer texture diagnostic after fetch"
-        );
         return;
     }
     let (fetched, failed) =
         fetch::load_assets_url(assets, &wanted, url, urls.static_.as_deref(), urls.layout);
     tracing::info!(fetched, failed, "fetched assets");
-    tracing::info!(
-        key = DIAGNOSTIC_KEY,
-        cached_after = assets.contains(DIAGNOSTIC_KEY),
-        decodable_after = assets.get_premultiplied_rgba(DIAGNOSTIC_KEY).is_some(),
-        "profile renderer texture diagnostic after fetch"
-    );
 }
 
-/// Asset keys `card` and `profile` draw that the store lacks.
-pub(crate) fn missing_asset_keys(
+/// Shared dependency plan for static and animated exports.
+pub(crate) fn asset_plan(
     renderer: &CustomProfileRenderer,
     card: &CustomProfileCard,
     profile: Option<&ProfileData>,
     store: &AssetStore,
-) -> Vec<String> {
-    let md = renderer.masterdata();
-    let mut keys = sekai_profile::asset_keys::missing_card_asset_keys_with_profile(
-        card,
-        profile,
-        &md,
-        |key| store.contains(key),
-    );
-    if let Some(profile) = profile {
-        keys.extend(sekai_profile::asset_keys::missing_profile_asset_keys(
-            profile,
-            &md,
-            |key| store.contains(key),
-        ));
-    }
-    // The standard card level bar is a General recipe texture. Keep this
-    // explicit fallback so an older or incomplete scene resolver cannot omit
-    // it from the fetch list.
-    if !store.contains("card/bg_base_wh") {
-        keys.push("card/bg_base_wh".to_owned());
-    }
-    // General panels lower into image commands whose resources are not part
-    // of the raw card/profile asset tables. Collect the actual resolved image
-    // resources so static frames, icons, masks, and future General sprites
-    // all use the same BOT asset endpoint without maintaining a name list.
-    match sekai_profile::semantic_resolve::resolve_card_commands_with_resources(
-        card,
-        &md,
-        "asset-keys",
-        profile,
-        md.region().as_str(),
-        sekai_profile::semantic_resolve::ResolveResourceContext {
-            assets: Some(store),
-            render_objects: None,
-            catalog_lookup_ns: None,
-        },
-    ) {
-        Ok(scene) => {
-            for command in scene.commands {
-                if let sekai_profile::core::SemanticCommandPayload::Image {
-                    resource,
-                    alpha_mask,
-                    ..
-                } = command.payload
-                {
-                    for resource in std::iter::once(resource).chain(alpha_mask) {
-                        if (resource.namespace == "assets" || resource.namespace == "static")
-                            && !store.contains(&resource.key)
-                        {
-                            keys.push(resource.key);
-                        }
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed to resolve profile image resources");
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
+) -> Result<sekai_profile::asset_keys::RenderAssetPlan, String> {
+    sekai_profile::asset_keys::RenderAssetPlan::build(card, profile, &renderer.masterdata(), store)
+        .map_err(|error| format!("resolve page asset plan: {error}"))
 }
 
 /// Renders `card` and encodes it.
@@ -566,12 +485,8 @@ fn render(args: RenderArgs) -> Result<(), String> {
     let profile = profile_json.as_ref().map(ProfileData::from_json);
 
     let mut renderer = resources.renderer();
-    resources.fetch(&missing_asset_keys(
-        &renderer,
-        &card,
-        profile.as_ref(),
-        &resources.assets,
-    ));
+    let plan = asset_plan(&renderer, &card, profile.as_ref(), &resources.assets)?;
+    resources.fetch(&plan.fetch_keys(|key| resources.assets.contains(key)));
     let dir = AtlasDir::new(&args.atlas_dir);
     if !args.no_prepare {
         let codepoints = renderer
@@ -595,7 +510,8 @@ fn render(args: RenderArgs) -> Result<(), String> {
     for warning in renderer.validate_card(&card) {
         tracing::warn!("{warning}");
     }
-    let missing = missing_asset_keys(&renderer, &card, profile.as_ref(), &resources.assets);
+    let missing = asset_plan(&renderer, &card, profile.as_ref(), &resources.assets)?
+        .missing_keys(|key| resources.assets.contains(key));
     if !missing.is_empty() {
         tracing::warn!(count = missing.len(), keys = ?missing, "assets are missing and are drawn transparent");
     }

@@ -243,12 +243,14 @@ fn handle_render(
     let card = crate::select_card(card.cloned(), profile, selection)?;
     let profile = profile.map(sekai_profile::profile::ProfileData::from_json);
     let warnings = renderer.validate_card(&card);
+    let plan = crate::asset_plan(renderer, &card, profile.as_ref(), assets)?;
     crate::fetch_assets(
         assets,
         asset_urls,
-        &crate::missing_asset_keys(renderer, &card, profile.as_ref(), assets),
+        &plan.fetch_keys(|key| assets.contains(key)),
     );
-    let missing_assets = crate::missing_asset_keys(renderer, &card, profile.as_ref(), assets);
+    let missing_assets = crate::asset_plan(renderer, &card, profile.as_ref(), assets)?
+        .missing_keys(|key| assets.contains(key));
 
     let config = RenderConfig {
         background: if transparent {

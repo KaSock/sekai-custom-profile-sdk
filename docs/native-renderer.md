@@ -75,6 +75,14 @@ Any type that implements `masterdata::MasterDataProvider` can stand in for
 running renderer; renders already in progress keep the masterdata they
 started with. One renderer serves any number of concurrent renders.
 
+`asset_keys::RenderAssetPlan::build(card, profile, masterdata, assets)`
+collects the page's image dependencies, including shared General/card-overlay
+recipes and alpha masks. `fetch_keys` lists missing download candidates;
+rebuild the plan after fetching, then use `missing_keys` to check required
+resources. Honor-frame alternatives retain their fallback rules. A scene
+resolution error is returned to the caller instead of producing an incomplete
+resource list.
+
 The `ordered_pages` example in `crates/sekai-profile/examples/` renders every
 page of a card list with the same calls.
 
@@ -214,11 +222,14 @@ cargo run -p sekai-profile --example plain_canvas -- <font-file> <output.png>
 | --- | --- |
 | `bundled-freetype` | Builds the bundled FreeType sources instead of finding FreeType through pkg-config |
 | `jpeg-turbo` | JPEG encoding with the bundled libjpeg-turbo (`to_jpeg`, `encode_jpeg`) |
-| `parallel` | Rasterizes on a dedicated rayon thread pool; the output is byte-identical to a serial build |
+| `parallel` (default) | Rasterizes static pages, animation layers and deferred animation windows on a shared dedicated rayon thread pool; the output is byte-identical to a serial build |
 | `animation-export` | Animation rendering and the GIF, WebP, APNG and MP4 encoders; links libx264 |
 | `dev` | Diagnostics for the SDF generators, used by the `compare_sdf` example |
 
-No feature is enabled by default.
+`parallel` is enabled by default. Use `default-features = false` (or
+`--no-default-features` when building this library) for serial rasterization.
+The scalar and SIMD executors both use disjoint, tile-aligned row bands;
+commands within each band retain their original drawing order.
 
 ## Environment variables
 
@@ -227,6 +238,7 @@ No feature is enabled by default.
 | `SEKAI_PROFILE_FONT_DIR` | Font directory searched after the directories given to `set_font_dirs` |
 | `FONT_DIR` | Font directory searched after `SEKAI_PROFILE_FONT_DIR`; `assets/fonts` is searched last |
 | `SEKAI_PROFILE_SDF_EDT` | `1` to `4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
+| `SEKAI_PROFILE_RASTER_THREADS` | With `parallel`, the shared raster pool size: `1` to `64`; defaults to the available CPU parallelism, capped at `8`. Read when the pool is first used. |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas: `1` to `4`, default `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true` or `yes` emits `tracing` debug events for TMP layout probes and text codepoints |
 

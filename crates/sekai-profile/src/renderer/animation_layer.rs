@@ -450,15 +450,12 @@ impl CustomProfileRenderer {
 
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
         let execute_started = std::time::Instant::now();
-        let execution_stats = match executor {
-            Executor::Scalar => plan.execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)?,
-            Executor::Simd => plan.execute_simd(
-                &source,
-                [0, 0, 0, 0],
-                &mut rgba,
-                crate::sdf::tile::SdfAccumulationMode::F32Tile,
-            )?,
-        };
+        let execution_stats = plan.execute_native_f32(
+            &source,
+            executor,
+            crate::sdf::tile::SdfDestination::Clear([0, 0, 0, 0]),
+            &mut rgba,
+        )?;
         let execute_ns = elapsed_ns(execute_started);
 
         let crop_started = std::time::Instant::now();
@@ -598,15 +595,12 @@ impl CustomProfileRenderer {
                 "deferred animation SDF surface byte length overflow",
             ))?;
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
-        match layer.executor {
-            Executor::Scalar => plan.execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)?,
-            Executor::Simd => plan.execute_simd(
-                &source,
-                [0, 0, 0, 0],
-                &mut rgba,
-                crate::sdf::tile::SdfAccumulationMode::F32Tile,
-            )?,
-        };
+        plan.execute_native_f32(
+            &source,
+            layer.executor,
+            crate::sdf::tile::SdfDestination::Clear([0, 0, 0, 0]),
+            &mut rgba,
+        )?;
         let pixels = crop_pixels_lossless(
             LayerSurface {
                 pixels: &rgba,

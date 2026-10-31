@@ -106,6 +106,28 @@ impl SdfTilePlan {
                 actual: output.len(),
             });
         }
+        self.execute_scalar_rows(
+            atlas,
+            destination,
+            output,
+            accumulation,
+            use_precomputed_shapes,
+            0,
+        )
+    }
+
+    // `output` owns complete tile rows beginning at `first_y`, with a possibly
+    // partial last row at the bottom of the canvas. Coordinates used to sample
+    // the atlas stay in canvas space; only destination offsets are rebased.
+    pub(super) fn execute_scalar_rows(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        destination: SdfDestination,
+        output: &mut [u8],
+        accumulation: SdfAccumulationMode,
+        use_precomputed_shapes: bool,
+        first_y: u32,
+    ) -> Result<SdfExecutionStats, SdfTileError> {
         if let SdfDestination::Clear(clear) = destination {
             for pixel in output.as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&clear);
@@ -125,9 +147,10 @@ impl SdfTilePlan {
         let mut stats = SdfExecutionStats::default();
         let tiles_x = self.grid.tiles_x();
 
-        for tile_index in
-            0..u32::try_from(self.tile_offsets.len() - 1).map_err(|_| SdfTileError::SizeOverflow)?
-        {
+        let rows = output.len() / (self.grid.canvas_width as usize * 4);
+        let first_tile = first_y / u32::from(self.grid.tile_height) * tiles_x;
+        let end_tile = (first_y + rows as u32).div_ceil(u32::from(self.grid.tile_height)) * tiles_x;
+        for tile_index in first_tile..end_tile {
             let spans = self
                 .spans_for_tile(tile_index)
                 .ok_or(SdfTileError::CorruptPlan)?;
@@ -149,7 +172,7 @@ impl SdfTilePlan {
                     for row in 0..valid_height {
                         for x in 0..valid_width {
                             let tile_pixel = row as usize * tile_width + x as usize;
-                            let output_pixel = ((origin_y + row) as usize
+                            let output_pixel = ((origin_y - first_y + row) as usize
                                 * self.grid.canvas_width as usize
                                 + (origin_x + x) as usize)
                                 * 4;
@@ -263,7 +286,7 @@ impl SdfTilePlan {
             let write_span = |row: u32, x0: u32, x1: u32, output: &mut [u8]| {
                 for x in x0..x1 {
                     let tile_pixel = row as usize * tile_width + x as usize;
-                    let output_pixel = ((origin_y + row) as usize
+                    let output_pixel = ((origin_y - first_y + row) as usize
                         * self.grid.canvas_width as usize
                         + (origin_x + x) as usize)
                         * 4;
