@@ -120,6 +120,12 @@ impl RenderAssetPlan {
             .iter()
             .flatten()
             .map(|resource| resource.key.clone())
+            .chain(
+                required
+                    .optional
+                    .iter()
+                    .map(|resource| resource.key.clone()),
+            )
             .collect::<Vec<_>>();
         if card
             .generals
@@ -324,12 +330,12 @@ fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRe
     // Player rank icon.
     keys.push("sprite/icon/icon_playerRank".to_string());
 
-    for slot in &profile.honor_slots {
+    for (slot, render_full) in crate::profile::ordered_honor_slots(&profile.honor_slots) {
         if slot.profile_honor_type == "bonds" {
             let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
             collect_bonds_honor_keys(
                 slot.honor_id,
-                slot.full_size,
+                render_full,
                 slot.bonds_honor_word_id.unwrap_or(0),
                 inverse,
                 use_unit_virtual_singer,
@@ -337,13 +343,7 @@ fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRe
                 &mut keys,
             );
         } else {
-            collect_honor_keys(
-                slot.honor_id,
-                slot.honor_level,
-                slot.full_size,
-                md,
-                &mut keys,
-            );
+            collect_honor_keys(slot.honor_id, slot.honor_level, render_full, md, &mut keys);
         }
     }
 

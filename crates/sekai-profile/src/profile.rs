@@ -53,6 +53,21 @@ impl HonorSlot {
     }
 }
 
+/// Honor panel slots in render order, paired with the main/sub dimensions
+/// assigned after the game's slot shuffle.
+pub fn ordered_honor_slots(honors: &[HonorSlot]) -> Vec<(&HonorSlot, bool)> {
+    let mut ordered = honors.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|slot| std::cmp::Reverse(slot.full_size));
+    if ordered.len() >= 2 {
+        ordered.swap(0, 1);
+    }
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| (slot, index == 0))
+        .collect()
+}
+
 /// The leader card, shown by the leader member panel (General type 5).
 #[derive(Debug, Clone, Default)]
 pub struct LeaderCardInfo {

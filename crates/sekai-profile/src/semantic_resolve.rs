@@ -565,16 +565,9 @@ fn populate_profile_base(snapshot: &mut ProfileResolveSnapshot, sources: Snapsho
                 },
             })
         });
-        let mut ordered_honor_slots = profile.honor_slots.iter().collect::<Vec<_>>();
-        ordered_honor_slots.sort_by_key(|slot| std::cmp::Reverse(slot.full_size));
-        if ordered_honor_slots.len() >= 2 {
-            ordered_honor_slots.swap(0, 1);
-        }
-        let honor_slots = ordered_honor_slots
+        let honor_slots = crate::profile::ordered_honor_slots(&profile.honor_slots)
             .into_iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let render_full = index == 0;
+            .filter_map(|(slot, render_full)| {
                 if slot.profile_honor_type == "bonds" {
                     let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
                     build_bonds_honor_visual(

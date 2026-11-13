@@ -23,6 +23,170 @@ fn plan_object() -> serde_json::Value {
     })
 }
 
+fn honor_plan_masterdata() -> crate::masterdata::MasterData {
+    let mut provider = crate::masterdata::JsonMasterDataProvider::empty();
+    let rows = [
+        (6622, "event", "honor_top_001000", "honor_bg_event_forlight"),
+        (
+            3381,
+            "event",
+            "honor_top_002000",
+            "honor_bg_event_underwater",
+        ),
+        (
+            3452,
+            "event",
+            "honor_top_001000_event_underwater_cp4",
+            "honor_bg_event_underwater_cp4",
+        ),
+        (
+            6103,
+            "event",
+            "honor_top_002000",
+            "honor_bg_event_wl_2nd_schoolrefusal",
+        ),
+        (5023, "rank_match", "common/tier_23", "season_2024_autumn"),
+        (5390, "rank_match", "common/tier_23", "season_2025_winter"),
+        (5818, "rank_match", "common/tier_25", "season_2025_spring"),
+        (3021, "achievement", "honor_3021", ""),
+    ];
+    let honors = rows.map(|(id, _, bundle, _)| {
+        serde_json::json!({
+            "id": id, "groupId": id, "honorRarity": "high", "assetbundleName": bundle,
+            "levels": [{"level": 1}]
+        })
+    });
+    let groups = rows.map(|(id, kind, _, background)| {
+        serde_json::json!({
+            "id": id, "honorType": kind, "backgroundAssetbundleName": background
+        })
+    });
+    provider
+        .insert_table("honors", &serde_json::to_string(&honors).unwrap())
+        .unwrap();
+    provider
+        .insert_table("honorGroups", &serde_json::to_string(&groups).unwrap())
+        .unwrap();
+    provider
+        .insert_table(
+            "customProfileTextFonts",
+            r#"[{"id":1,"fontName":"fixture","name":"fixture"}]"#,
+        )
+        .unwrap();
+    crate::masterdata::MasterData::new(std::sync::Arc::new(provider))
+}
+
+#[test]
+fn placed_honor_overlays_are_downloaded_even_when_they_are_optional() {
+    let md = honor_plan_masterdata();
+    for id in [3381, 3452, 6103, 5023, 5390, 5818] {
+        for full_size in [true, false] {
+            let assets = crate::assets::AssetStore::new(1);
+            let card = serde_json::from_value(serde_json::json!({
+                "honors": [{"objectData": plan_object(), "id": id, "fullSize": full_size}]
+            }))
+            .unwrap();
+            let honor = md.resolve_honor(id, 1).unwrap().asset_plan(full_size);
+            let overlay = honor.overlay.unwrap().key;
+            let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).unwrap();
+            let keys = plan.fetch_keys(|_| false);
+            assert!(keys.contains(&overlay), "missing download: {overlay}");
+            // An unavailable overlay must still allow export of the remaining layers.
+            let png = crate::codec::png::encode_rgba(1, 1, &[255; 4]).unwrap();
+            for key in keys.iter().filter(|key| **key != overlay) {
+                assets.put(key.clone(), png.clone());
+            }
+            let plan = super::RenderAssetPlan::build(&card, None, &md, &assets).unwrap();
+            assert!(plan.missing_keys(|key| assets.contains(key)).is_empty());
+            assert_eq!(
+                plan.fetch_keys(|key| assets.contains(key)),
+                [overlay.clone()]
+            );
+            assets.put(overlay.clone(), png);
+            let scene = crate::semantic_resolve::resolve_card_commands_with_profile(
+                &card,
+                &md,
+                "downloaded-honor",
+                None,
+                "cn",
+                Some(&assets),
+            )
+            .unwrap();
+            assert!(
+                scene.commands.iter().any(|command| matches!(
+                    &command.payload,
+                    sekai_profile_core::SemanticCommandPayload::Image { resource, .. }
+                        if resource.key == overlay
+                )),
+                "downloaded overlay was not drawn: {overlay}"
+            );
+        }
+    }
+}
+
+#[test]
+fn general_honors_download_the_sizes_used_by_the_rendered_slots() {
+    let md = honor_plan_masterdata();
+    let assets = crate::assets::AssetStore::new(1);
+    let card = serde_json::from_value(serde_json::json!({
+        "generals": [{"objectData": plan_object(), "type": 6}]
+    }))
+    .unwrap();
+    let profile = crate::profile::ProfileData::from_json(&serde_json::json!({
+        "userHonors": [
+            {"honorId": 6622, "level": 1},
+            {"honorId": 5390, "level": 1},
+            {"honorId": 3021, "level": 6}
+        ],
+        "userProfileHonors": [
+            {"seq": 1, "honorId": 6622, "honorLevel": 1},
+            {"seq": 2, "honorId": 5390, "honorLevel": 1},
+            {"seq": 3, "honorId": 3021, "honorLevel": 6}
+        ]
+    }));
+    let expected = [
+        "honor/honor_bg_event_forlight/degree_main",
+        "honor/honor_top_001000/rank_main",
+        "rank_live/honor/season_2025_winter/degree_sub",
+        "rank_live/honor/common/tier_23/sub",
+        "honor/honor_3021/degree_sub",
+    ];
+    let plan = super::RenderAssetPlan::build(&card, Some(&profile), &md, &assets).unwrap();
+    let keys = plan.fetch_keys(|_| false);
+    for key in expected {
+        assert!(
+            keys.iter().any(|candidate| candidate == key),
+            "missing download: {key}"
+        );
+    }
+    let png = crate::codec::png::encode_rgba(1, 1, &[255; 4]).unwrap();
+    for key in keys {
+        assets.put(key, png.clone());
+    }
+    let plan = super::RenderAssetPlan::build(&card, Some(&profile), &md, &assets).unwrap();
+    assert!(plan.fetch_keys(|key| assets.contains(key)).is_empty());
+    assert!(plan.missing_keys(|key| assets.contains(key)).is_empty());
+    let scene = crate::semantic_resolve::resolve_card_commands_with_profile(
+        &card,
+        &md,
+        "downloaded-honor-panel",
+        Some(&profile),
+        "en",
+        Some(&assets),
+    )
+    .unwrap();
+    for key in expected {
+        assert!(
+            scene.commands.iter().any(|command| matches!(
+                &command.payload,
+                sekai_profile_core::SemanticCommandPayload::Image { resource, .. }
+                    if resource.key == key
+            )),
+            "downloaded honor layer was not drawn: {key}"
+        );
+    }
+}
+
 #[test]
 fn cropped_card_overlay_plans_its_textures_without_a_general_panel() {
     let md = render_plan_masterdata();

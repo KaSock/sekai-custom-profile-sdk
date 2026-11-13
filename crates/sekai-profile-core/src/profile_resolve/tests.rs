@@ -1203,7 +1203,11 @@ fn card_honors_draw_level_stars_for_every_multi_level_honor_type() {
     }
 }
 
-fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Vec<String> {
+fn prepared_honor_resource_keys(
+    honor_type: &str,
+    asset_bundle_name: &str,
+    background_asset_bundle_name: Option<&str>,
+) -> Vec<String> {
     let object = serde_json::json!({
         "layer": 1, "lock": false,
         "position": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1227,7 +1231,8 @@ fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Ve
     data.insert_value(
         "honorGroups",
         serde_json::json!([{
-            "id": 1, "honorType": honor_type, "hasStar": false, "isLiveMaster": false
+            "id": 1, "honorType": honor_type, "hasStar": false, "isLiveMaster": false,
+            "backgroundAssetbundleName": background_asset_bundle_name
         }]),
     )
     .unwrap();
@@ -1241,13 +1246,19 @@ fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Ve
 
 #[test]
 fn honor_types_without_rank_art_request_no_rank_overlay() {
-    for (honor_type, asset_bundle_name) in [
-        ("character", "honor_0042"),
-        ("achievement", "honor_0105"),
-        ("limitevent", "honor_se_ln_1"),
-        ("limitevent", "honor_top_000020"),
+    for (honor_type, asset_bundle_name, background) in [
+        ("character", "honor_0042", None),
+        ("achievement", "honor_0105", None),
+        ("limitevent", "honor_se_ln_1", None),
+        ("limitevent", "honor_top_000020", None),
+        (
+            "event",
+            "honor_bg_limited_gacha202601",
+            Some("honor_bg_limited_gacha202601"),
+        ),
+        ("event", "honor_0246", None),
     ] {
-        let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
+        let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name, background);
         assert!(keys.iter().any(|key| key.ends_with("/degree_sub")));
         assert!(
             !keys.iter().any(|key| key.ends_with("/rank_sub")),
@@ -1258,12 +1269,12 @@ fn honor_types_without_rank_art_request_no_rank_overlay() {
 
 #[test]
 fn overlay_bearing_honor_bundles_request_rank_assets() {
-    for (honor_type, asset_bundle_name) in [
-        ("sekai_echo", "honor_0182"),
-        ("event", "honor_memorial"),
-        ("event", "honor_0305"),
+    for (honor_type, asset_bundle_name, background) in [
+        ("sekai_echo", "honor_0182", None),
+        ("event", "honor_memorial", Some("honor_bg_event_memorial")),
+        ("event", "honor_0305", Some("honor_bg_event_shared")),
     ] {
-        let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
+        let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name, background);
         assert!(
             keys.iter()
                 .any(|key| key == &format!("honor/{asset_bundle_name}/rank_sub")),
