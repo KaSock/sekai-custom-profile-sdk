@@ -21,6 +21,7 @@ function browserRenderer() {
     stats() { return {}; }
   }
   const dependencies = {
+    "./highResolutionSdf.js": { refineHighResolutionSdf: async (atlas, instances) => ({ atlas, instances }) },
     "./gpu/browserSemanticResources.js": { BrowserSemanticResourceManager: Resources },
     "./resourceProvider.js": { profileResourceDescriptors: () => [] },
     "./localizationProvider.js": {},

@@ -10,6 +10,36 @@ const CACHE_SCHEMA: &str = "allium.glyph-raster-cache.v1";
 const THRESHOLD: u32 = 128;
 const DOWNSAMPLE_VERSION: &str = "box-v2";
 
+// FIX-BROWSER-SDF-01: Sampling size and distance range travel together. The
+// 75px contract stays byte-for-byte compatible with existing cached glyphs.
+#[derive(Clone, Copy)]
+pub(crate) struct GlyphSampling {
+    pub point_size: f32,
+    pub spread: f32,
+}
+
+impl GlyphSampling {
+    pub fn new(point_size: f32) -> Result<Self, String> {
+        if !point_size.is_finite() || !(TMP_POINT_SIZE..=4096.0).contains(&point_size) {
+            return Err("SDF sampling point size must be between 75 and 4096".into());
+        }
+        let point_size = point_size.ceil();
+        Ok(Self {
+            point_size,
+            spread: TMP_SPREAD * (point_size / TMP_POINT_SIZE),
+        })
+    }
+}
+
+impl Default for GlyphSampling {
+    fn default() -> Self {
+        Self {
+            point_size: TMP_POINT_SIZE,
+            spread: TMP_SPREAD,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RasterBackend {
@@ -108,18 +138,45 @@ pub fn plan(
     backend: RasterBackend,
     requested_supersample: usize,
 ) -> Result<GlyphRasterPlan, String> {
+    plan_at_sampling(
+        font_bytes,
+        codepoints,
+        region,
+        family,
+        font_source_hash,
+        backend,
+        requested_supersample,
+        GlyphSampling::default(),
+    )
+}
+
+pub(crate) fn plan_at_sampling(
+    font_bytes: Vec<u8>,
+    codepoints: &[u32],
+    region: String,
+    family: String,
+    font_source_hash: String,
+    backend: RasterBackend,
+    requested_supersample: usize,
+    sampling: GlyphSampling,
+) -> Result<GlyphRasterPlan, String> {
     let supersample = backend.normalized_supersample(requested_supersample);
     let raster_contract_id = format!(
         "allium-r8-{}-ss{supersample}-spread{}-threshold{THRESHOLD}-{DOWNSAMPLE_VERSION}",
         backend.name(),
-        TMP_SPREAD as usize,
+        sampling.spread,
     );
+    let raster_contract_id = if sampling.point_size == TMP_POINT_SIZE {
+        raster_contract_id
+    } else {
+        format!("{raster_contract_id}-point{}", sampling.point_size)
+    };
     let contract_id = format!("{FONT_ENGINE_FINGERPRINT}:{raster_contract_id}");
     let library = Library::init().map_err(|error| format!("FreeType init failed: {error:?}"))?;
     let face = library
         .new_memory_face(Rc::new(font_bytes), 0)
         .map_err(|error| format!("load memory face failed: {error:?}"))?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+    face.set_char_size((sampling.point_size * 64.0).round() as isize, 0, 72, 72)
         .map_err(|error| format!("set char size failed: {error:?}"))?;
     let mut glyphs = Vec::with_capacity(codepoints.len());
     let mut missing = Vec::new();
@@ -144,6 +201,7 @@ pub fn plan(
                 backend,
                 supersample,
                 &raster_contract_id,
+                sampling,
             )?,
         });
     }
@@ -158,8 +216,8 @@ pub fn plan(
         contract_id,
         backend,
         supersample,
-        base_size: TMP_POINT_SIZE,
-        spread: TMP_SPREAD,
+        base_size: sampling.point_size,
+        spread: sampling.spread,
         atlas_width: atlas.page_width,
         atlas_height: atlas.page_height,
         glyphs,
@@ -174,6 +232,7 @@ fn identity(
     backend: RasterBackend,
     supersample: usize,
     raster_contract_id: &str,
+    sampling: GlyphSampling,
 ) -> Result<GlyphRasterIdentity, String> {
     let canonical = json!([
         ["schema", CACHE_SCHEMA],
@@ -182,12 +241,15 @@ fn identity(
         ["face_index", 0],
         ["variation_axes", json!([])],
         ["glyph_id", glyph_index],
-        ["point_size_26d6", (TMP_POINT_SIZE as u32) * 64],
+        [
+            "point_size_26d6",
+            (sampling.point_size * 64.0).round() as u32
+        ],
         ["dpi_x", 72],
         ["dpi_y", 72],
         ["load_flags", backend.load_flags()],
         ["render_mode", backend.render_mode()],
-        ["spread_26d6", (TMP_SPREAD as u32) * 64],
+        ["spread_26d6", (sampling.spread * 64.0).round() as u32],
         ["sdf_algorithm", backend.name()],
         ["supersample", supersample],
         ["threshold", THRESHOLD],
@@ -217,10 +279,44 @@ mod tests {
     #[test]
     fn identity_matches_the_existing_browser_cache_namespace() {
         let contract = "allium-r8-edt-ss2-spread6-threshold128-box-v2";
-        let planned = identity("cn", &"a".repeat(64), 42, RasterBackend::Edt, 2, contract).unwrap();
+        let planned = identity(
+            "cn",
+            &"a".repeat(64),
+            42,
+            RasterBackend::Edt,
+            2,
+            contract,
+            GlyphSampling::default(),
+        )
+        .unwrap();
         assert_eq!(
             planned.opaque_key,
             "bbe3831d69a962e1a532a659a62c31984b78c4695ab7be41c1dbd8fb1f7be673"
         );
+    }
+
+    #[test]
+    fn sampling_changes_cache_identity_and_preserves_distance_range() {
+        let base = GlyphSampling::default();
+        let large = GlyphSampling::new(300.0).unwrap();
+        assert_eq!(large.spread, 24.0);
+        let key = |sampling| {
+            identity(
+                "cn",
+                &"a".repeat(64),
+                42,
+                RasterBackend::Edt,
+                2,
+                "same-contract",
+                sampling,
+            )
+            .unwrap()
+            .opaque_key
+        };
+        assert_ne!(key(base), key(large));
+        assert_eq!(GlyphSampling::new(300.1).unwrap().point_size, 301.0);
+        for size in [f32::NAN, f32::INFINITY, 0.0, 74.0, 4097.0] {
+            assert!(GlyphSampling::new(size).is_err());
+        }
     }
 }

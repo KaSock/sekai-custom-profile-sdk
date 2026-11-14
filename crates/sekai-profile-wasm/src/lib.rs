@@ -245,6 +245,79 @@ pub unsafe extern "C" fn sdf_layout_freetype_plan_glyphs_json(
     }))
 }
 
+// FIX-BROWSER-SDF-01: Additive ABI for high-resolution glyphs; existing exports
+// retain their original signatures and 75px sampling contract.
+/// # Safety
+///
+/// Pointer validity and ownership are the same as
+/// `sdf_layout_freetype_plan_glyphs_json`. Release the returned string with
+/// `sdf_layout_freetype_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_plan_glyphs_at_size_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    backend_ptr: *const c_char,
+    supersample: usize,
+    point_size: f32,
+) -> *mut c_char {
+    core_json_call(|| {
+        if font_ptr.is_null() || codepoints_ptr.is_null() {
+            return Err("null font or codepoint pointer".into());
+        }
+        let sampling = glyph_plan::GlyphSampling::new(point_size)?;
+        let plan = glyph_plan::plan_at_sampling(
+            slice::from_raw_parts(font_ptr, font_len).to_vec(),
+            slice::from_raw_parts(codepoints_ptr, codepoints_len),
+            read_c_string(region_ptr)?,
+            read_c_string(family_ptr)?,
+            read_c_string(font_source_hash_ptr)?,
+            glyph_plan::RasterBackend::parse(&read_c_string(backend_ptr)?)?,
+            supersample,
+            sampling,
+        )?;
+        serde_json::to_string(&plan).map_err(|error| error.to_string())
+    })
+}
+
+/// # Safety
+///
+/// Pointer validity and ownership are the same as
+/// `sdf_layout_freetype_build_glyph_json_edt`. A zero supersample selects the
+/// analytic backend; otherwise it is clamped to 1..=4. Release the returned
+/// string with `sdf_layout_freetype_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_build_glyphs_at_size_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    supersample: usize,
+    point_size: f32,
+) -> *mut c_char {
+    core_json_call(|| {
+        let sampling = glyph_plan::GlyphSampling::new(point_size)?;
+        build_glyph_batch_json_at_sampling(
+            RawSlice::new(font_ptr, font_len),
+            RawSlice::new(codepoints_ptr, codepoints_len),
+            RawFontIdentity {
+                region: region_ptr,
+                family: family_ptr,
+                font_source_hash: font_source_hash_ptr,
+            },
+            supersample.min(4),
+            sampling,
+        )
+    })
+}
+
 /// # Safety
 ///
 /// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
@@ -1055,6 +1128,22 @@ unsafe fn build_glyph_batch_json(
     raw_identity: RawFontIdentity,
     supersample: usize,
 ) -> Result<String, String> {
+    build_glyph_batch_json_at_sampling(
+        font,
+        codepoints,
+        raw_identity,
+        supersample,
+        glyph_plan::GlyphSampling::default(),
+    )
+}
+
+unsafe fn build_glyph_batch_json_at_sampling(
+    font: RawSlice<u8>,
+    codepoints: RawSlice<u32>,
+    raw_identity: RawFontIdentity,
+    supersample: usize,
+    sampling: glyph_plan::GlyphSampling,
+) -> Result<String, String> {
     if font.ptr.is_null() || codepoints.ptr.is_null() {
         return Err("null font or codepoint pointer".to_string());
     }
@@ -1065,12 +1154,12 @@ unsafe fn build_glyph_batch_json(
 
     let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
     let t1 = Instant::now();
-    let face = open_memory_face(&library, &font_bytes, TMP_POINT_SIZE)?;
+    let face = open_memory_face(&library, &font_bytes, sampling.point_size)?;
     let raster_face = if supersample > 1 {
         Some(open_memory_face(
             &library,
             &font_bytes,
-            TMP_POINT_SIZE * supersample as f32,
+            sampling.point_size * supersample as f32,
         )?)
     } else {
         None
@@ -1092,10 +1181,17 @@ unsafe fn build_glyph_batch_json(
         }
         let g0 = Instant::now();
         let glyph_result = if supersample > 0 {
-            build_glyph_edt(&face, raster_face, &identity, ch, supersample)
-                .or_else(|_| build_glyph(&face, &identity, ch))
+            build_glyph_edt(
+                &face,
+                raster_face,
+                &identity,
+                ch,
+                supersample,
+                sampling.spread,
+            )
+            .or_else(|_| build_glyph(&face, &identity, ch, sampling.spread))
         } else {
-            build_glyph(&face, &identity, ch)
+            build_glyph(&face, &identity, ch, sampling.spread)
         };
         match glyph_result {
             Ok(glyph) => {
@@ -1118,8 +1214,8 @@ unsafe fn build_glyph_batch_json(
         region,
         family,
         font_source_hash,
-        base_size: TMP_POINT_SIZE,
-        spread: TMP_SPREAD,
+        base_size: sampling.point_size,
+        spread: sampling.spread,
         glyphs,
         missing,
         perf: GlyphBatchPerf {
@@ -1311,13 +1407,13 @@ impl SamplingMetrics {
         }
     }
 
-    fn grid(self) -> GlyphSdfGrid {
+    fn grid(self, spread: f32) -> GlyphSdfGrid {
         GlyphSdfGrid::from_metrics(
             self.bearing_x,
             self.bearing_y,
             self.width,
             self.height,
-            TMP_SPREAD,
+            spread,
         )
     }
 }
@@ -1340,7 +1436,12 @@ fn has_outline(slot: &freetype::GlyphSlot) -> bool {
     outline.n_contours > 0 && outline.n_points > 0
 }
 
-fn build_glyph(face: &freetype::Face, font: &FontIdentity, ch: char) -> Result<GlyphSdf, String> {
+fn build_glyph(
+    face: &freetype::Face,
+    font: &FontIdentity,
+    ch: char,
+    spread: f32,
+) -> Result<GlyphSdf, String> {
     let glyph_id = face
         .get_char_index(ch as usize)
         .ok_or_else(|| "missing cmap entry".to_string())?;
@@ -1359,8 +1460,8 @@ fn build_glyph(face: &freetype::Face, font: &FontIdentity, ch: char) -> Result<G
     if contours.is_empty() {
         return Ok(empty_metric_glyph(font, ch, glyph_id, metrics.advance));
     }
-    let grid = metrics.grid();
-    let pixels = sdf_glyph::analytic_sdf(&contours, grid, TMP_SPREAD);
+    let grid = metrics.grid(spread);
+    let pixels = sdf_glyph::analytic_sdf(&contours, grid, spread);
     Ok(glyph_sdf(font, ch, glyph_id, metrics, grid, &pixels))
 }
 
@@ -1373,6 +1474,7 @@ fn build_glyph_edt(
     font: &FontIdentity,
     ch: char,
     supersample: usize,
+    spread: f32,
 ) -> Result<GlyphSdf, String> {
     let glyph_id = face
         .get_char_index(ch as usize)
@@ -1385,7 +1487,7 @@ fn build_glyph_edt(
     if !has_outline(slot) {
         return Ok(empty_metric_glyph(font, ch, glyph_id, metrics.advance));
     }
-    let grid = metrics.grid();
+    let grid = metrics.grid(spread);
 
     raster_face
         .load_glyph(glyph_id, LoadFlag::NO_HINTING)
@@ -1409,7 +1511,7 @@ fn build_glyph_edt(
         left: raster.bitmap_left(),
         top: raster.bitmap_top(),
     };
-    let pixels = sdf_glyph::edt_sdf(&coverage, grid, supersample, TMP_SPREAD);
+    let pixels = sdf_glyph::edt_sdf(&coverage, grid, supersample, spread);
     Ok(glyph_sdf(font, ch, glyph_id, metrics, grid, &pixels))
 }
 
@@ -1563,6 +1665,31 @@ mod tests {
     }
 
     #[test]
+    fn sampled_grid_uses_the_scaled_distance_padding() {
+        let metrics = SamplingMetrics {
+            bearing_x: -1.25,
+            bearing_y: 32.75,
+            width: 20.5,
+            height: 35.25,
+            advance: 24.0,
+        };
+        let base = metrics.grid(TMP_SPREAD);
+        let sampling = glyph_plan::GlyphSampling::new(300.0).unwrap();
+        let large = SamplingMetrics {
+            bearing_x: metrics.bearing_x * 4.0,
+            bearing_y: metrics.bearing_y * 4.0,
+            width: metrics.width * 4.0,
+            height: metrics.height * 4.0,
+            advance: metrics.advance * 4.0,
+        }
+        .grid(sampling.spread);
+        assert!(large.width > base.width * 3);
+        assert!(large.height > base.height * 3);
+        assert_eq!(large.left, -29.0);
+        assert_eq!(large.top, 155.0);
+    }
+
+    #[test]
     fn supersampled_edt_tracks_the_analytic_field_on_the_same_grid() {
         let Ok(bytes) = std::fs::read(TEST_FONT) else {
             eprintln!("skipping: {TEST_FONT} is not installed");
@@ -1579,8 +1706,9 @@ mod tests {
             font_source_hash: "hash".into(),
         };
         for ch in ['O', 'g'] {
-            let exact = build_glyph(&face, &font, ch).expect("analytic glyph");
-            let edt = build_glyph_edt(&face, &raster_face, &font, ch, 4).expect("EDT glyph");
+            let exact = build_glyph(&face, &font, ch, TMP_SPREAD).expect("analytic glyph");
+            let edt =
+                build_glyph_edt(&face, &raster_face, &font, ch, 4, TMP_SPREAD).expect("EDT glyph");
             assert_eq!((edt.width, edt.height), (exact.width, exact.height));
             assert_eq!(
                 (edt.bearing_x, edt.bearing_y, edt.advance),

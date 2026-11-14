@@ -140,7 +140,8 @@ class BrowserWorker:
         for index in range(self.page_count):
             page = await self.context.new_page()
             page.on('console', lambda message: LOG.log(
-                logging.WARNING if message.type in ('warning', 'error') else logging.DEBUG,
+                logging.WARNING if message.type in ('warning', 'error')
+                else logging.INFO if message.type == 'info' else logging.DEBUG,
                 '[%s] browser: %s', self.region, message.text))
             await page.goto(base, wait_until='load', timeout=120_000)
             gpu = await page.evaluate('async region => (await window.alliumReady).initialize(region)', self.region)

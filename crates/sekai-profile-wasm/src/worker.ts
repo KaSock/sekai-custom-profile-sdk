@@ -807,7 +807,20 @@ async function buildGlyphBatch(request: GlyphBatchRequest, mapOnly: boolean): Pr
       argumentTypes.push("number");
       arguments_.push(Math.max(1, Math.floor(request.supersample ?? 2)));
     }
-    resultPointer = mod.ccall(name, "number", argumentTypes, arguments_) as number;
+    // FIX-BROWSER-SDF-01: Keep old calls on the unchanged 75px ABI. A sampled
+    // request requires the matching rebuilt WASM instead of silently degrading.
+    if (!mapOnly && request.pointSize != null) {
+      if (!edt) {
+        argumentTypes.push("number");
+        arguments_.push(0);
+      }
+      argumentTypes.push("number");
+      arguments_.push(request.pointSize);
+    }
+    resultPointer = mod.ccall(
+      !mapOnly && request.pointSize != null ? "sdf_layout_freetype_build_glyphs_at_size_json" : name,
+      "number", argumentTypes, arguments_,
+    ) as number;
     const result = JSON.parse(readCString(mod, resultPointer)) as (FreeTypeGlyphBatch | FreeTypeGlyphMapBatch) & { error?: string };
     if (result.error) throw new WorkerError("GLYPH_BUILD_FAILED", result.error);
     return result;
@@ -830,21 +843,25 @@ async function planGlyphBatch(request: GlyphBatchRequest): Promise<GlyphRasterPl
   try {
     mod.HEAPU8.set(font, fontPointer);
     mod.HEAPU32.set(codepoints, codePointer >>> 2);
+    const argumentTypes: Array<"number" | "string"> = ["number", "number", "number", "number", "string", "string", "string", "string", "number"];
+    const arguments_: Array<number | string> = [
+      fontPointer,
+      font.byteLength,
+      codePointer,
+      codepoints.length,
+      request.region,
+      request.family,
+      request.sourceHash,
+      request.backend ?? "edt",
+      Math.max(0, Math.floor(request.supersample ?? 2)),
+    ];
+    if (request.pointSize != null) {
+      argumentTypes.push("number");
+      arguments_.push(request.pointSize);
+    }
     resultPointer = mod.ccall(
-      "sdf_layout_freetype_plan_glyphs_json",
-      "number",
-      ["number", "number", "number", "number", "string", "string", "string", "string", "number"],
-      [
-        fontPointer,
-        font.byteLength,
-        codePointer,
-        codepoints.length,
-        request.region,
-        request.family,
-        request.sourceHash,
-        request.backend ?? "edt",
-        Math.max(0, Math.floor(request.supersample ?? 2)),
-      ],
+      request.pointSize == null ? "sdf_layout_freetype_plan_glyphs_json" : "sdf_layout_freetype_plan_glyphs_at_size_json",
+      "number", argumentTypes, arguments_,
     ) as number;
     const plan = JSON.parse(readCString(mod, resultPointer)) as GlyphRasterPlan & { error?: string };
     if (plan.error) throw new WorkerError("GLYPH_PLAN_FAILED", plan.error);

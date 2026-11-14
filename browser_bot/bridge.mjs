@@ -58,7 +58,7 @@ export async function createBridge(BrowserRenderer) {
       scene = await renderer.createProfileScene({
         masterData, profile, documentKey, pageIndex: 0, frameMode: "animate",
         // The browser stays alive across requests; do not imply disk persistence.
-        sdf: { persistence: "memory-only" },
+        sdf: { persistence: "memory-only", atlasHardPages: 16 },
       });
       const prepared = performance.now();
       const timing = { prepare_ms: Math.round(prepared - started) };

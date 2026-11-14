@@ -44,6 +44,8 @@ export type GlyphBatchRequest = {
   chars: string[];
   backend?: "edt" | "analytic";
   supersample?: number;
+  /** FIX-BROWSER-SDF-01: Sampling resolution, independent of layout font size. */
+  pointSize?: number;
 };
 
 export type RendererFontContract = {

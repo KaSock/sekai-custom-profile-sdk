@@ -135,16 +135,30 @@ export function glyphKey(region: string, fontSourceHash: string, family: string,
 export async function buildSdfAtlas(
   fontSources: FontSource[],
   requests: GlyphRequest[],
-  options: { worker: RendererWorkerClient; persistence?: PersistentCacheSelection; persistentCache?: GlyphPersistentCache },
+  options: {
+    worker: RendererWorkerClient;
+    persistence?: PersistentCacheSelection;
+    persistentCache?: GlyphPersistentCache;
+    /** @internal FIX-BROWSER-SDF-01: Raster size only; never used for layout. */
+    pointSize?: number;
+    /** @internal Store resolution variants in the base atlas's bounded pool. */
+    sessionContractId?: string;
+    /** Atlas page limit shared by the base atlas and its resolution variants. */
+    atlasHardPages?: number;
+  },
   supersample?: number,
   backend?: SdfBackend,
 ): Promise<SdfAtlas> {
   validateFontSources(fontSources);
+  const atlasHardPages = options.atlasHardPages ?? 6;
+  if (!Number.isInteger(atlasHardPages) || atlasHardPages < 1 || atlasHardPages > 32) {
+    throw new Error("atlasHardPages must be an integer between 1 and 32");
+  }
   const sdfBackend = backend ?? (supersample != null && supersample <= 0 ? "analytic" : "edt");
   const persistent = options.persistentCache ?? (options.persistence === "origin" ? getOriginPersistentCache() : new GlyphPersistentCache());
   const uniqueRequests = deduplicateRequests(requests);
-  const plan = await planGlyphs(options.worker, fontSources, uniqueRequests, sdfBackend, supersample ?? 2);
-  const engine = await getEngine(options.worker, plan.contractId);
+  const plan = await planGlyphs(options.worker, fontSources, uniqueRequests, sdfBackend, supersample ?? 2, options.pointSize);
+  const engine = await getEngine(options.worker, options.sessionContractId ?? plan.contractId, atlasHardPages);
   const planned = new Map(plan.glyphs.map((glyph) => [
     glyphKey(glyph.region, glyph.fontSourceHash, glyph.family, glyph.ch),
     glyph,
@@ -166,106 +180,112 @@ export async function buildSdfAtlas(
   const cached = [...persisted.values()].map(recordToAtlas);
   for (const record of cached) engine.metrics.set(record.key, withoutPixels(record));
   const missing = [...unique.values()].filter((value) => !persisted.has(value.identity.opaqueKey));
-  const generate = generationGroups(fontSources, missing, plan.backend, plan.supersample);
+  const generate = generationGroups(fontSources, missing, plan.backend, plan.supersample, options.pointSize == null ? undefined : plan.baseSize);
   const workerBefore = await options.worker.stats();
   const result = await engine.atlas.resolve([...unique.keys()], cached, generate);
-  engine.latestStats = result.stats;
-  const placementByKey = new Map(result.placements.map((entry) => [entry.key, entry.placement] as const));
-  for (const [key, placement] of placementByKey) {
-    engine.placements.set(key, { page: placement.page, pageEpoch: placement.pageEpoch });
-  }
-  const sessionHitKeys = new Set([...unique.keys()].filter((key) => {
-    const before = placementsBefore.get(key);
-    const after = placementByKey.get(key);
-    return before != null && after != null && before.page === after.page && before.pageEpoch === after.pageEpoch;
-  }));
-  const sessionHits = sessionHitKeys.size;
-  const persistentHits = [...persisted.keys()].filter((key) => !sessionHitKeys.has(key)).length;
-  for (const record of result.generated) engine.metrics.set(record.key, withoutPixels(record));
-  if (result.generated.length > 0) {
-    const writeEpoch = persistent.beginWrite();
-    const records = await Promise.all(result.generated.map((record) => {
-      const identity = unique.get(record.key)?.identity;
-      if (!identity) throw new Error(`generated atlas resource has unknown identity ${record.key}`);
-      return createPersistentGlyphRecord(identity, record);
+  try {
+    engine.latestStats = result.stats;
+    const placementByKey = new Map(result.placements.map((entry) => [entry.key, entry.placement] as const));
+    for (const [key, placement] of placementByKey) {
+      engine.placements.set(key, { page: placement.page, pageEpoch: placement.pageEpoch });
+    }
+    const sessionHitKeys = new Set([...unique.keys()].filter((key) => {
+      const before = placementsBefore.get(key);
+      const after = placementByKey.get(key);
+      return before != null && after != null && before.page === after.page && before.pageEpoch === after.pageEpoch;
     }));
-    void persistent.putMany(records, writeEpoch).catch(() => undefined);
-  }
-  const glyphs = new Map<string, GlyphInfo>();
-  for (const value of resolved) {
-    const resourceId = value.identity.opaqueKey;
-    const placement = placementByKey.get(resourceId);
-    const metrics = engine.metrics.get(resourceId);
-    if (!placement || !metrics) throw new Error(`WASM atlas omitted glyph resource ${resourceId}`);
-    glyphs.set(requestKey(value.request), {
-      key: requestKey(value.request),
-      resourceId,
-      glyphIndex: value.glyphIndex,
-      page: placement.page,
-      pageEpoch: placement.pageEpoch,
-      region: value.request.region,
-      family: value.request.family,
-      fontSourceHash: value.request.fontSourceHash,
-      char: value.request.char,
-      u0: placement.u0,
-      v0: placement.v0,
-      u1: placement.u1,
-      v1: placement.v1,
-      width: metrics.width,
-      height: metrics.height,
-      advance: metrics.advance,
-      xOffset: metrics.xOffset,
-      yOffset: metrics.yOffset,
-      planeBearingX: metrics.planeBearingX,
-      planeBearingY: metrics.planeBearingY,
-      planeWidth: metrics.planeWidth,
-      planeHeight: metrics.planeHeight,
-      drawable: metrics.drawable,
-    });
-  }
-  const workerAfter = await options.worker.stats();
-  let released = false;
-  return {
-    width: plan.atlasWidth,
-    height: plan.atlasHeight,
-    depth: result.stats.pages,
-    baseSize: plan.baseSize,
-    spread: plan.spread,
-    glyphs,
-    missing: uniqueRequests.filter((request) => engine.missingChars.has(requestKey(request))).map(requestKey),
-    backend: "freetype-wasm",
-    sdfBackend: plan.backend,
-    contractId: plan.contractId,
-    fontEngineFingerprint: plan.fontEngineFingerprint,
-    perf: {
-      backend: sdfBackend,
-      fontBatches: [],
-      totalGlyphMs: Math.max(0, workerAfter.wasmMs - workerBefore.wasmMs),
-      totalFaceLoadMs: 0,
-      totalGlyphCount: result.generated.length,
-      totalPixelCount: result.generated.reduce((sum, record) => sum + record.pixels.byteLength, 0),
-      worker: workerAfter,
-      cache: {
-        hits: sessionHits + persistentHits,
-        misses: unique.size - sessionHits - persistentHits,
-        generations: result.generated.length,
-        bytes: result.stats.atlasBytes,
-        sessionHits,
-        persistentHits,
-        persistentMisses: unique.size - sessionHits - persistentHits,
-        persistentWritesQueued: result.generated.length,
-        pages: result.stats.pages,
-        pinnedPages: result.stats.pinnedPages,
-        pageEvictions: result.stats.evictions,
+    const sessionHits = sessionHitKeys.size;
+    const persistentHits = [...persisted.keys()].filter((key) => !sessionHitKeys.has(key)).length;
+    for (const record of result.generated) engine.metrics.set(record.key, withoutPixels(record));
+    if (result.generated.length > 0) {
+      const writeEpoch = persistent.beginWrite();
+      const records = await Promise.all(result.generated.map((record) => {
+        const identity = unique.get(record.key)?.identity;
+        if (!identity) throw new Error(`generated atlas resource has unknown identity ${record.key}`);
+        return createPersistentGlyphRecord(identity, record);
+      }));
+      void persistent.putMany(records, writeEpoch).catch(() => undefined);
+    }
+    const glyphs = new Map<string, GlyphInfo>();
+    for (const value of resolved) {
+      const resourceId = value.identity.opaqueKey;
+      const placement = placementByKey.get(resourceId);
+      const metrics = engine.metrics.get(resourceId);
+      if (!placement || !metrics) throw new Error(`WASM atlas omitted glyph resource ${resourceId}`);
+      glyphs.set(requestKey(value.request), {
+        key: requestKey(value.request),
+        resourceId,
+        glyphIndex: value.glyphIndex,
+        page: placement.page,
+        pageEpoch: placement.pageEpoch,
+        region: value.request.region,
+        family: value.request.family,
+        fontSourceHash: value.request.fontSourceHash,
+        char: value.request.char,
+        u0: placement.u0,
+        v0: placement.v0,
+        u1: placement.u1,
+        v1: placement.v1,
+        width: metrics.width,
+        height: metrics.height,
+        advance: metrics.advance,
+        xOffset: metrics.xOffset,
+        yOffset: metrics.yOffset,
+        planeBearingX: metrics.planeBearingX,
+        planeBearingY: metrics.planeBearingY,
+        planeWidth: metrics.planeWidth,
+        planeHeight: metrics.planeHeight,
+        drawable: metrics.drawable,
+      });
+    }
+    const workerAfter = await options.worker.stats();
+    let released = false;
+    return {
+      width: plan.atlasWidth,
+      height: plan.atlasHeight,
+      depth: result.stats.pages,
+      baseSize: plan.baseSize,
+      spread: plan.spread,
+      glyphs,
+      missing: uniqueRequests.filter((request) => engine.missingChars.has(requestKey(request))).map(requestKey),
+      backend: "freetype-wasm",
+      sdfBackend: plan.backend,
+      contractId: engine.contractId,
+      fontEngineFingerprint: plan.fontEngineFingerprint,
+      perf: {
+        backend: sdfBackend,
+        fontBatches: [],
+        totalGlyphMs: Math.max(0, workerAfter.wasmMs - workerBefore.wasmMs),
+        totalFaceLoadMs: 0,
+        totalGlyphCount: result.generated.length,
+        totalPixelCount: result.generated.reduce((sum, record) => sum + record.pixels.byteLength, 0),
+        worker: workerAfter,
+        cache: {
+          hits: sessionHits + persistentHits,
+          misses: unique.size - sessionHits - persistentHits,
+          generations: result.generated.length,
+          bytes: result.stats.atlasBytes,
+          sessionHits,
+          persistentHits,
+          persistentMisses: unique.size - sessionHits - persistentHits,
+          persistentWritesQueued: result.generated.length,
+          pages: result.stats.pages,
+          pinnedPages: result.stats.pinnedPages,
+          pageEvictions: result.stats.evictions,
+        },
       },
-    },
-    pageUpdates: (revisions) => engine.atlas.pages(revisions),
-    release: async () => {
-      if (released) return;
-      released = true;
-      await Promise.all(result.leases.map((lease) => engine.atlas.release(lease)));
-    },
-  };
+      pageUpdates: (revisions) => engine.atlas.pages(revisions),
+      release: async () => {
+        if (released) return;
+        released = true;
+        await Promise.all(result.leases.map((lease) => engine.atlas.release(lease)));
+      },
+    };
+  } catch (error) {
+    // A failed hash/metrics/readback must not pin a partially built tier.
+    await Promise.allSettled(result.leases.map((lease) => engine.atlas.release(lease)));
+    throw error;
+  }
 }
 
 export function getPersistentGlyphCache(): GlyphPersistentCache {
@@ -282,15 +302,16 @@ export function disposeWorkerAtlasSessions(worker: RendererWorkerClient): void {
   engines.delete(worker);
 }
 
-async function getEngine(worker: RendererWorkerClient, contractId: string): Promise<SessionEngine> {
+async function getEngine(worker: RendererWorkerClient, contractId: string, atlasHardPages: number): Promise<SessionEngine> {
   let byContract = engines.get(worker);
   if (!byContract) {
     byContract = new Map();
     engines.set(worker, byContract);
   }
-  let pending = byContract.get(contractId);
+  const sessionKey = `${contractId}\0${atlasHardPages}`;
+  let pending = byContract.get(sessionKey);
   if (!pending) {
-    pending = worker.createAtlas().then((atlas) => {
+    pending = worker.createAtlas({ hardPages: atlasHardPages }).then((atlas) => {
       const engine: SessionEngine = {
         atlas,
         contractId,
@@ -307,7 +328,7 @@ async function getEngine(worker: RendererWorkerClient, contractId: string): Prom
       registered.add(engine);
       return engine;
     });
-    byContract.set(contractId, pending);
+    byContract.set(sessionKey, pending);
   }
   return pending;
 }
@@ -318,6 +339,7 @@ async function planGlyphs(
   requests: readonly GlyphRequest[],
   backend: SdfBackend,
   supersample: number,
+  pointSize?: number,
 ): Promise<CanonicalGlyphRasterPlan> {
   const groups = new Map<string, { font: FontSource; chars: string[]; seen: Set<string> }>();
   for (const font of fonts) groups.set(fontSourceKey(font), { font, chars: [], seen: new Set() });
@@ -336,6 +358,7 @@ async function planGlyphs(
     chars: group.chars,
     backend,
     supersample,
+    ...(pointSize == null ? {} : { pointSize }),
   })));
   const first = plans[0];
   if (!first) throw new Error("WASM glyph raster plan requires at least one glyph request");
@@ -364,6 +387,7 @@ function generationGroups(
   missing: readonly ResolvedRequest[],
   backend: SdfBackend,
   supersample: number,
+  pointSize?: number,
 ): AtlasGenerateRequest[] {
   const groups = new Map<string, AtlasGenerateRequest>();
   for (const value of missing) {
@@ -373,6 +397,7 @@ function generationGroups(
     let group = groups.get(key);
     if (!group) {
       group = { region: font.region, family: font.family, sourceHash: font.sourceHash, chars: [], backend, supersample, glyphs: [] };
+      if (pointSize != null) group.pointSize = pointSize;
       groups.set(key, group);
     }
     group.chars.push(value.request.char);

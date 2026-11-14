@@ -124,8 +124,8 @@ export class RendererWorkerClient {
     return result.batch;
   }
 
-  async createAtlas(): Promise<RendererAtlas> {
-    const result = await this.request("createAtlas", {});
+  async createAtlas(options: { hardPages?: number } = {}): Promise<RendererAtlas> {
+    const result = await this.request("createAtlas", options);
     if (result.kind !== "createAtlas") throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid atlas response");
     return new RendererAtlas(this, result.atlasId, result.stats);
   }

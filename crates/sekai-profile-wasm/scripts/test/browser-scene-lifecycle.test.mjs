@@ -36,6 +36,7 @@ function harness({ prepare, create, upload, failRelease } = {}) {
     snapshot() { return {}; }
   }
   const dependencies = {
+    "./highResolutionSdf.js": { refineHighResolutionSdf: async (atlas, instances) => ({ atlas, instances }) },
     "./gpu/browserSemanticResources.js": { BrowserSemanticResourceManager: Resources },
     "./resourceProvider.js": { profileResourceDescriptors: () => [] },
     "./localizationProvider.js": {},

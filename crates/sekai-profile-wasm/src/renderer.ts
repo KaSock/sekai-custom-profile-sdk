@@ -21,6 +21,7 @@ import {
   semanticCommandPlanFromCoreSnapshot,
 } from "./gpu/semanticCommandPlanner.js";
 import { SemanticWebglSceneRenderer } from "./gpu/semanticWebglSceneRenderer.js";
+import { refineHighResolutionSdf } from "./highResolutionSdf.js";
 import type { NumericTextRegion } from "./interaction/numericTextRegions.js";
 import {
   buildSdfAtlas,
@@ -111,6 +112,10 @@ export type ProfileSceneCreateOptions = {
     backend?: SdfBackend;
     supersample?: number;
     persistence?: PersistentCacheSelection;
+    /** FIX-BROWSER-SDF-01: Refine magnified static glyphs after layout. Defaults to true. */
+    highResolution?: boolean;
+    /** Maximum 2048x2048 atlas pages for this renderer worker. Defaults to 6. */
+    atlasHardPages?: number;
   };
 };
 
@@ -319,7 +324,8 @@ export class BrowserRenderer {
         atlas ??= await buildSdfAtlas(
           requiredFontSources(glyphRequests, this.fonts),
           glyphRequests,
-          { worker: this.worker, persistence: options.sdf?.persistence ?? "origin" },
+          { worker: this.worker, persistence: options.sdf?.persistence ?? "origin",
+            atlasHardPages: options.sdf?.atlasHardPages },
           options.sdf?.supersample,
           options.sdf?.backend,
         );
@@ -354,11 +360,25 @@ export class BrowserRenderer {
         core.initial.snapshot as unknown as Parameters<typeof semanticCommandPlanFromCoreSnapshot>[0],
       );
       assertPreparedResources(plan.resourceRequests(), acquired.sources);
+      // FIX-BROWSER-SDF-01: Only static pages need browser export quality in
+      // the combined BOT backend; animated pages retain their existing path.
+      let renderLayout = compiled.layout;
+      if (atlas && options.sdf?.highResolution !== false && compiled.layout.dynamicPrograms.length === 0) {
+        const refined = await refineHighResolutionSdf(atlas, compiled.layout.instances, plan.operations(), {
+          worker: this.worker, fonts: [...this.fonts.values()],
+          persistence: options.sdf?.persistence ?? "origin", supersample: options.sdf?.supersample,
+          atlasHardPages: options.sdf?.atlasHardPages,
+          signal: abort.signal,
+        });
+        atlas = refined.atlas;
+        renderLayout = { ...compiled.layout, instances: refined.instances };
+        assertActive();
+      }
       renderer = new SemanticWebglSceneRenderer(this.gl);
       const bootstrap = await renderer.setScene({
         plan,
         atlas,
-        layout: compiled.layout,
+        layout: renderLayout,
         imageSources: acquired.sources,
         uguiText: compiled.uguiText,
       });
