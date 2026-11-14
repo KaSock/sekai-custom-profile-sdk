@@ -53,7 +53,7 @@ Rust 子进程，无需修改 BOT 项目。
 | `SEKAI_PROFILE_EXECUTOR` | `auto` | 服务请求选用 `auto`、`scalar`、`avx2` 或 `simd`；不支持的显式执行器会报错。 |
 | `SEKAI_PROFILE_DECODED_CACHE_MB` | 原压缩素材缓存预算 | 非负 MiB；`0` 关闭解码缓存的保留，可用于比较冷、热请求。 |
 | `SEKAI_PROFILE_PNG_MODE` | 快速模式 | `small` 恢复原 PNG 输出算法；其他值使用快速模式。 |
-| `SEKAI_PROFILE_RASTER_THREADS` | 可用 CPU 并行度，最多 8 | 原有开关；比较执行器时保持线程数一致。 |
+| `SEKAI_PROFILE_RASTER_THREADS` | 可用 CPU 并行度，最多 8 | 1–64；原生 SDF 光栅化及动画帧清屏、合成共用的线程池大小，首次使用时读取。比较执行器时保持线程数一致。 |
 
 PowerShell 示例：
 
@@ -114,3 +114,31 @@ $env:SEKAI_PROFILE_PNG_MODE = 'fast'
 
 此缺陷在命令规划阶段触发，与 AVX2 指令支持无关。源码中存在上述并发触发路径，
 但未运行玩家资料复现、编译或回归测试；本次只做格式化与静态差异检查。
+
+## 动画优化
+
+| 标记 | 代码段 | 修改及作用 |
+| --- | --- | --- |
+| PERF-ANIM-01 | `crates/sekai-profile/src/animation/deferred.rs`：`DeferredSdfTileCache`、`render_deferred_animation_window_cached` | 使用 `LruCache<DeferredSdfTileKey, Arc<[u8]>>` 管理图块。命中时共享像素；新图块交给缓存和当前帧共同持有，减少整块像素复制和手工维护淘汰顺序的开销。组装可见窗口仍需要拷贝对应像素。 |
+| PERF-ANIM-02 | `crates/sekai-profile/src/animation/export.rs`：`retained_layer_budget`、`deferred_tile_cache_reserve` | 在保留完整图层前，为 MP4 延迟图块缓存预留最多 16 MiB，且不超过导出预算的四分之一。沿用现有总预算，避免完整图层先占满预算导致图块缓存失效；实际缓存可用空间仍扣除帧缓冲等占用。 |
+| PERF-ANIM-03 | `crates/sekai-profile/src/animation/compositor.rs`：`for_each_row`、`fill_white`、`blit_layer` | 覆盖区域达到 65,536 像素时按行并行，小区域串行；白底按行填充。每行独立写入，图层先后顺序和取样、混合公式保持原样。 |
+| PERF-ANIM-03 | `crates/sekai-profile/src/raster_parallel.rs`：`raster_pool`；`sdf/tile/native_execute.rs`、`lib.rs` | 将现有 SDF 线程池提取为内部共享模块，动画合成复用同一池。保留 `SEKAI_PROFILE_RASTER_THREADS=1..64`、默认可用并行度最多 8 的规则。 |
+
+`animation/tests.rs` 同步了缓存共享、替换、拒绝超预算图块、MP4 缓存预留、
+小图层移动脏区、大区域清屏和图层合成像素对照测试；另外覆盖了缩小导出预算时的预留上限。
+本次不执行编译或 Rust 测试；只做源码格式和静态差异检查。
+
+### 部署与对比
+
+1. 使用原来的 `build-bot.ps1` 构建，停止部署机服务后替换原生 exe 及构建产物中的配套 DLL，
+   再启动服务。无需重建浏览器 SDK，也无需修改 BOT 或浏览器桥接代码。
+2. 保持 `backend: "browser"`、`animation_preset`、资料内容和线程配置相同。
+   例如继续使用 `SEKAI_PROFILE_PAGE_THREADS=4`、`SEKAI_PROFILE_RASTER_THREADS=8`；
+   前者限制原生页面并发，后者限制多个导出任务共用的光栅与合成工作线程总数。
+   x264 的编码线程另计，不由光栅线程池控制。
+3. 更新前后分别先完整请求一次，排除浏览器、原生进程启动以及素材下载，再连续请求同一份资料。
+   记录 BOT 返回的 `compute_ms`、`total_ms`、图片/视频数量，检查动态内容及画面是否正常。
+   图块缓存存在于单次动画导出内，并非跨请求的视频结果缓存。
+4. 五张图片加五段视频的整批结果，仍会等待浏览器阶段及所有原生动态页完成后返回。
+   多视频会按原生页面并发数分批执行；此次优化针对 CPU 帧合成与缓存，不改变帧率、时长、
+   编码质量或启用硬件编码。收益由具体场景决定，以部署机对比结果为准。

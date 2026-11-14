@@ -75,6 +75,9 @@ pub mod output;
 pub mod prepare;
 pub mod profile;
 pub mod profile_compositor;
+// PERF-ANIM-03: Share the native raster pool with animation frame composition.
+#[cfg(feature = "parallel")]
+mod raster_parallel;
 pub mod region;
 pub mod render_config;
 pub mod render_object;

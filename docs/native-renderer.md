@@ -228,7 +228,7 @@ cargo run -p sekai-profile --example plain_canvas -- <font-file> <output.png>
 | --- | --- |
 | `bundled-freetype` | Builds the bundled FreeType sources instead of finding FreeType through pkg-config |
 | `jpeg-turbo` | JPEG encoding with the bundled libjpeg-turbo (`to_jpeg`, `encode_jpeg`) |
-| `parallel` (default) | Rasterizes static pages, animation layers and deferred animation windows on a shared dedicated rayon thread pool; the output is byte-identical to a serial build |
+| `parallel` (default) | Rasterizes static pages, animation layers and deferred animation windows, and fills and blits large animation frame regions, on one shared dedicated rayon thread pool; the output is byte-identical to a serial build |
 | `animation-export` | Animation rendering and the GIF, WebP, APNG and MP4 encoders; links libx264 |
 | `dev` | Diagnostics for the SDF generators, used by the `compare_sdf` example |
 
@@ -247,7 +247,7 @@ commands within each band retain their original drawing order.
 | `SEKAI_PROFILE_FONT_DIR` | Font directory searched after the directories given to `set_font_dirs` |
 | `FONT_DIR` | Font directory searched after `SEKAI_PROFILE_FONT_DIR`; `assets/fonts` is searched last |
 | `SEKAI_PROFILE_SDF_EDT` | `1` to `4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
-| `SEKAI_PROFILE_RASTER_THREADS` | With `parallel`, the shared raster pool size: `1` to `64`; defaults to the available CPU parallelism, capped at `8`. Read when the pool is first used. |
+| `SEKAI_PROFILE_RASTER_THREADS` | With `parallel`, the shared SDF raster and animation fill/blit pool size: `1` to `64`; defaults to the available CPU parallelism, capped at `8`. Read when the pool is first used. |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas: `1` to `4`, default `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true` or `yes` emits `tracing` debug events for TMP layout probes and text codepoints |
 
