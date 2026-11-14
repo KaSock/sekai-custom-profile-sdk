@@ -15,6 +15,7 @@ crates/sekai-profile-wasm/build.log
 crates/sekai-profile-wasm/serve-demo.cjs
 *.log
 node_modules/
+__pycache__/
 /tmp/
 
 # Local code index

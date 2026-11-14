@@ -34,6 +34,9 @@ browser renderer and edits and previews custom profile cards in the browser.
   APNG, MP4).
 - A WebGL2 browser renderer driven by Rust/WASM in a worker, with dynamic
   scenes, layer visibility, tabs, scrolling and hit geometry.
+- A local BOT HTTP service combining GPU-rendered static JPEG pages in
+  Chromium with native MP4 animation export, using the same BOT request
+  and asset interfaces.
 - Host-defined font, localization and image providers: the application
   decides where every resource comes from.
 - Inspectable scene dumps and bounded telemetry.
@@ -177,6 +180,13 @@ for single renders. `serve` answers render requests as NDJSON on stdin. See
 
 ## Documentation
 
+- [BOT deployment](docs/BOT_DEPLOYMENT.zh-CN.md) (Chinese): native builds,
+  fonts, service configuration and BOT integration.
+- [Combined browser and native rendering](docs/BROWSER_BOT.zh-CN.md)
+  (Chinese): browser SDK builds, GPU static pages, native animation export
+  and service operation.
+- [Native performance notes](docs/native-performance.zh-CN.md) (Chinese):
+  optimization locations, executors and thread settings.
 - [Architecture](docs/architecture.md): responsibilities, scene creation,
   layers and interaction, caches, debugging and telemetry.
 - [Native renderer](docs/native-renderer.md): the Rust library API, the plain

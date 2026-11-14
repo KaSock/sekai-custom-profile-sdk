@@ -1,4 +1,10 @@
 {
+  "backend": "native",
+  "browser_sdk_dir": "runtime/browser-sdk/dist",
+  "browser_page_threads": 2,
+  "browser_channel": "chromium",
+  "browser_headless": true,
+  "browser_require_hardware": true,
   "executable": "target/release/sekai-profile.exe",
   "bot_root": "D:/path/to/your/BOT",
   "bot_url": "http://127.0.0.1:8080",

@@ -26,6 +26,8 @@ Sekai Custom Profile SDK 是面向 Project SEKAI（PJSK）自定义名片的非�
   批量渲染，以及动画导出（GIF、WebP、APNG、MP4）。
 - WebGL2 浏览器渲染器，由 worker 中的 Rust/WASM 驱动，支持动态场景、图层显隐、tab、
   滚动与命中几何。
+- BOT 本地 HTTP 服务支持组合渲染：浏览器通过 GPU 绘制静态名片并输出 JPEG，
+  动态名片由原生程序导出 MP4，复用同一套 BOT 请求与素材接口。
 - 字体、本地化与图片 provider 由宿主定义：每项资源来自哪里由应用决定。
 - 可检查的场景 dump 与有界 telemetry。
 
@@ -163,8 +165,11 @@ sekai-profile render --profile ./profile.json --masterdata ./masterdata \
 
 ## 文档
 
-`docs/` 下的文档为英文。
+SDK 通用文档以英文为主，BOT 部署与原生性能优化说明提供中文文档。
 
+- [BOT 本地部署](docs/BOT_DEPLOYMENT.zh-CN.md)：原生构建、字体、服务配置与 BOT 接入。
+- [浏览器与原生组合渲染](docs/BROWSER_BOT.zh-CN.md)：浏览器 SDK 构建、GPU 静态页与原生动态导出、运行维护。
+- [原生性能优化](docs/native-performance.zh-CN.md)：优化代码位置、执行器与线程配置。
 - [Architecture](docs/architecture.md)：职责划分、场景创建流程、图层与交互、缓存、调试与 telemetry。
 - [Native renderer](docs/native-renderer.md)：Rust 库 API、纯 CPU 画布、Cargo feature 与环境变量。
 - [Command line](docs/cli.md)：`render`、`prepare`、`serve`，以及 masterdata 与素材来源。

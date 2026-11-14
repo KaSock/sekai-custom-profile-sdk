@@ -208,7 +208,16 @@ def create_app(cfg):
     bot_url = urlparse(cfg['bot_url'])
     if bot_url.scheme != 'http' or bot_url.hostname not in ('127.0.0.1', '::1', 'localhost'):
         raise ValueError('bot_url must be a loopback HTTP address')
-    workers = {region: Worker(cfg, region) for region in regions}
+    backend = cfg.get('backend', 'native')
+    if backend == 'native':
+        workers = {region: Worker(cfg, region) for region in regions}
+    elif backend == 'browser':
+        # BROWSER-01: Preserve the BOT HTTP contract and native animation export.
+        # Playwright is optional and never imported by the native backend.
+        from bot_browser import BrowserWorker
+        workers = {region: BrowserWorker(cfg, region, Worker(cfg, region)) for region in regions}
+    else:
+        raise ValueError('backend must be native or browser')
     # Native rendering is CPU/memory intensive. This gate is separate from
     # each region's pipe lock; queued clients never write concurrently.
     gate = asyncio.Semaphore(max(1, int(cfg.get('max_concurrent_renders', 1))))
@@ -217,7 +226,11 @@ def create_app(cfg):
     app = web.Application(client_max_size=16 * 1024 * 1024)
 
     async def health(request):
-        return web.json_response({'ok': True, 'regions': regions, 'pending': pending})
+        return web.json_response({
+            'ok': True, 'regions': regions, 'pending': pending, 'backend': backend,
+            'workers': {region: worker.status() for region, worker in workers.items()
+                        if hasattr(worker, 'status')},
+        })
 
     async def render(request):
         nonlocal pending
@@ -251,7 +264,7 @@ def create_app(cfg):
                     acquired = time.monotonic()
                     result = await worker.render(profile)
             return web.json_response({
-                'ok': True, 'data': result, 'source_url': cfg['source_url'],
+                'ok': True, 'data': result, 'source_url': cfg['source_url'], 'backend': backend,
                 'timing': {
                     'queue_wait_ms': round((acquired - start) * 1000),
                     'compute_ms': round((time.monotonic() - acquired) * 1000),
@@ -283,6 +296,11 @@ def main():
         path = Path(cfg[key])
         if not path.is_absolute():
             cfg[key] = str((args.config.resolve().parent / path).resolve())
+    for key in ('browser_sdk_dir', 'browser_executable'):
+        if cfg.get(key):
+            path = Path(cfg[key])
+            if not path.is_absolute():
+                cfg[key] = str((args.config.resolve().parent / path).resolve())
     logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
     web.run_app(create_app(cfg), host='127.0.0.1', port=int(cfg.get('port', 45557)),
                 access_log=None)
