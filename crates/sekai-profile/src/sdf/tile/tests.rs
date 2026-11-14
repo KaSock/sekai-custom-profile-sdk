@@ -221,6 +221,84 @@ fn rectangle(x0: f32, y0: f32, x1: f32, y1: f32) -> [Point2; 4] {
 }
 
 #[test]
+fn avx2_matches_scalar_for_mixed_sdf_clips_affines_and_tails() {
+    let atlas = PhysicalMixedAtlas {
+        text: std::array::from_fn(|index| (index * 37 + 19) as u8),
+        shape: std::array::from_fn(|index| (index * 11 + 71) as u8),
+    };
+    let mut text = command(
+        [0.4, 0.2, 0.1, 0.6],
+        [
+            Point2::new(-3.5, 1.25),
+            Point2::new(64.0, 5.5),
+            Point2::new(60.0, 42.25),
+            Point2::new(-7.5, 38.0),
+        ],
+    );
+    text.device_clip = Some(SdfDeviceClip {
+        min_x: 2.5,
+        min_y: 2.5,
+        max_x: 65.5,
+        max_y: 39.5,
+    });
+    if let SdfCommandMaterial::Text(material) = &mut text.material {
+        material.face_scale = 4.7;
+        material.face_bias = 1.6;
+        material.outline_scale = 3.1;
+        material.outline_bias = 0.8;
+        material.outline = [0.2, 0.1, 0.3, 0.5];
+        material.vertex_alpha = 0.73;
+    }
+    let shape = SdfDrawCommand {
+        kind: SdfPrimitiveKind::Shape,
+        atlas_set: 1,
+        material: SdfCommandMaterial::Shape(ShapeSdfMaterial::from_profile_values(
+            [0.1, 0.6, 0.3],
+            0.55,
+            [0.8, 0.2, 0.5],
+            0.4,
+            0.25,
+        )),
+        ..command([1.0; 4], rectangle(4.25, 0.5, 65.5, 41.5))
+    };
+    let commands = [text, shape, text];
+    for (tile_width, tile_height) in [(8, 16), (32, 32), (128, 8)] {
+        let grid = TileGrid {
+            canvas_width: 67,
+            canvas_height: 43,
+            tile_width,
+            tile_height,
+        };
+        let plan = SdfTilePlan::build(grid, &commands, &atlas).expect("plan");
+        let background = [17, 31, 47, 191].repeat(67 * 43);
+        let mut expected = background.clone();
+        plan.execute_scalar_f32_over(&atlas, &mut expected)
+            .expect("scalar");
+        let mut actual = background.clone();
+        let result = plan.execute_avx2_f32_over(&atlas, &mut actual);
+        if crate::sdf_avx2_available() {
+            assert!(result.expect("AVX2").simd_packet_count > 0);
+            assert_eq!(actual, expected, "{grid:?}");
+            let mut clear_expected = vec![0; actual.len()];
+            plan.execute_scalar_f32(&atlas, [3, 5, 7, 11], &mut clear_expected)
+                .expect("scalar clear");
+            plan.execute_avx2_f32(&atlas, [3, 5, 7, 11], &mut actual)
+                .expect("AVX2 clear");
+            assert_eq!(actual, clear_expected);
+        } else {
+            assert_eq!(result, Err(SdfTileError::Avx2Unavailable));
+            assert_eq!(actual, background, "unsupported executor must not write");
+        }
+        let mut short = vec![23; actual.len() - 1];
+        assert!(matches!(
+            plan.execute_avx2_f32(&atlas, [0; 4], &mut short),
+            Err(SdfTileError::OutputLength { .. })
+        ));
+        assert!(short.iter().all(|byte| *byte == 23));
+    }
+}
+
+#[test]
 fn native_raster_matches_serial_pixels_and_stats_across_tile_bands() {
     use crate::render_config::Executor;
 
@@ -268,7 +346,10 @@ fn native_raster_matches_serial_pixels_and_stats_across_tile_bands() {
                     .expect("dynamic plan"),
             ];
             for plan in plans {
-                for executor in [Executor::Scalar, Executor::Simd] {
+                for executor in [Executor::Scalar, Executor::Avx2, Executor::Simd] {
+                    if executor == Executor::Avx2 && !crate::sdf_avx2_available() {
+                        continue;
+                    }
                     if executor == Executor::Simd && !crate::sdf_simd_available() {
                         continue;
                     }
@@ -279,6 +360,12 @@ fn native_raster_matches_serial_pixels_and_stats_across_tile_bands() {
                         let mut serial = [17, 31, 47, 191].repeat(73 * 51);
                         let mut parallel = serial.clone();
                         let expected = match (executor, destination) {
+                            (Executor::Avx2, SdfDestination::Clear(clear)) => {
+                                plan.execute_avx2_f32(&atlas, clear, &mut serial)
+                            }
+                            (Executor::Avx2, SdfDestination::LoadExisting) => {
+                                plan.execute_avx2_f32_over(&atlas, &mut serial)
+                            }
                             (Executor::Scalar, SdfDestination::Clear(clear)) => {
                                 plan.execute_scalar_f32(&atlas, clear, &mut serial)
                             }

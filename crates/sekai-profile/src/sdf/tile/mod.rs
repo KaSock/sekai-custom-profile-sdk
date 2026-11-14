@@ -383,6 +383,8 @@ pub enum SdfTileError {
     CorruptPlan,
     #[error("Turin SIMD executor requires x86-64 AVX-512F/FMA/BW/VBMI")]
     SimdUnavailable,
+    #[error("AVX2 executor requires x86-64 AVX2 and FMA")]
+    Avx2Unavailable,
     #[error("SIMD executor cannot access physical swizzled atlas set {atlas_set} page {page}")]
     SimdAtlasUnavailable { atlas_set: u16, page: u16 },
 }

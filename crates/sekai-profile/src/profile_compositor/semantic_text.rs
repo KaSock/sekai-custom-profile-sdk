@@ -127,6 +127,7 @@ pub(super) fn render_semantic_text_commands(
         reason: error.to_string(),
     })?;
     match executor {
+        ImageExecutor::Avx2 => plan.execute_avx2_f32_over(&source, destination),
         ImageExecutor::Scalar => plan.execute_scalar_f32_over(&source, destination),
         ImageExecutor::Simd => plan.execute_simd_f32_over(&source, destination),
     }

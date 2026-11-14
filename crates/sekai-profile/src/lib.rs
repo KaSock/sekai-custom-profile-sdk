@@ -92,8 +92,8 @@ pub use atlas_dir::{AtlasDir, InstalledAtlases};
 pub use masterdata::JsonMasterDataProvider;
 pub use output::{EncodedPage, JpegEncoder, JpegOptions, RenderedBatch, RenderedPage};
 pub use render_config::{
-    sdf_simd_available, Background, PixelOcclusion, RenderCapabilities, RenderConfig, RenderError,
-    SdfExecutor,
+    sdf_avx2_available, sdf_simd_available, Background, PixelOcclusion, RenderCapabilities,
+    RenderConfig, RenderError, SdfExecutor,
 };
 pub use renderer::{CustomProfileRenderer, PrewarmReport, RenderObjectGenerationPin};
 pub use sdf::outline::set_font_dirs;

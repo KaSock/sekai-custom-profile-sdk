@@ -286,6 +286,10 @@ pub(super) fn map_captured_sdf_commands(
 
     let mut batch = crate::telemetry::RealtimeEdtBatchTelemetry::default();
     let active_batch = active_realtime_edt_batch();
+    // FIX-EDT-01: Runtime pages follow the CURRENT installed atlas registry.
+    // Another page can publish a fallback atlas after a batch was prepared,
+    // shifting this set id without changing the batch's page indices.
+    let runtime_set = u16::try_from(text_atlases.len() + usize::from(shape_atlas.is_some())).ok();
     let mut prepared = Vec::with_capacity(captured.len());
     let mut request_indices = BTreeMap::<RealtimeEdtRequestKey, usize>::new();
     let mut requests = Vec::<Request>::new();
@@ -426,12 +430,6 @@ pub(super) fn map_captured_sdf_commands(
                     prepared.push(PreparedCommand::Atlas(fallback_command));
                     continue;
                 }
-                if crate::sdf::outline::resolve_font_path(resolved_family).is_none() {
-                    batch.font_unavailable_fallback_count =
-                        batch.font_unavailable_fallback_count.saturating_add(1);
-                    prepared.push(PreparedCommand::Atlas(fallback_command));
-                    continue;
-                }
                 let runtime_spread = realtime_edt_sampling_spread(
                     atlas.manifest().point_size,
                     atlas.manifest().spread,
@@ -448,12 +446,13 @@ pub(super) fn map_captured_sdf_commands(
                     runtime_spread,
                 );
                 if let Some(active) = active_batch.as_deref() {
-                    let Some(entry) = active.entries.get(&key) else {
+                    let Some((entry, runtime_set)) = active.entries.get(&key).zip(runtime_set)
+                    else {
                         prepared.push(PreparedCommand::Atlas(fallback_command));
                         continue;
                     };
                     match glyph.to_sdf_command_from_manifest(
-                        entry.atlas_set,
+                        runtime_set,
                         &entry.manifest,
                         entry.point_size,
                         entry.spread,
@@ -470,6 +469,14 @@ pub(super) fn map_captured_sdf_commands(
                         )),
                         Err(_) => prepared.push(PreparedCommand::Atlas(fallback_command)),
                     }
+                    continue;
+                }
+                // Prepared pages already own their pixels; only new glyph
+                // generation needs access to the original font file.
+                if crate::sdf::outline::resolve_font_path(resolved_family).is_none() {
+                    batch.font_unavailable_fallback_count =
+                        batch.font_unavailable_fallback_count.saturating_add(1);
+                    prepared.push(PreparedCommand::Atlas(fallback_command));
                     continue;
                 }
                 batch.collected_glyph_count = batch.collected_glyph_count.saturating_add(1);
@@ -550,7 +557,6 @@ pub(super) fn map_captured_sdf_commands(
     #[cfg(not(feature = "parallel"))]
     let generated = requests.iter().map(generate).collect::<Vec<_>>();
 
-    let runtime_set = u16::try_from(text_atlases.len() + usize::from(shape_atlas.is_some())).ok();
     let pages = runtime_text_pages.expect("runtime pages were checked before collecting requests");
     let mut runtime_requests = (0..requests.len())
         .map(|_| None)
@@ -594,7 +600,6 @@ pub(super) fn map_captured_sdf_commands(
             entries.insert(
                 request.key.clone(),
                 RealtimeEdtPreparedEntry {
-                    atlas_set: runtime_set,
                     manifest: runtime_requests[request_index]
                         .as_ref()
                         .expect("runtime request was just installed")

@@ -18,6 +18,8 @@ pub fn capabilities() -> Value {
         "animation_export": cfg!(feature = "animation-export"),
         "profile_media": true,
         "jpeg": cfg!(feature = "jpeg-turbo"),
+        "sdf_avx512": sekai_profile::sdf_simd_available(),
+        "sdf_avx2": sekai_profile::sdf_avx2_available(),
     })
 }
 
@@ -74,7 +76,15 @@ pub fn render_profile_media(
     let preset = resolve_preset(preset_name, Some(AnimationFormat::Mp4))
         .map_err(|error| error.to_string())?;
     let profile = ProfileData::from_json(profile_json);
-    let config = RenderConfig::default();
+    let config = RenderConfig {
+        executor: crate::service_executor()?,
+        ..RenderConfig::default()
+    };
+    tracing::debug!(
+        executor = ?config.executor,
+        avx512 = sekai_profile::sdf_simd_available(), avx2 = sekai_profile::sdf_avx2_available(),
+        "profile media CPU capabilities (auto prefers AVX-512, then AVX2)"
+    );
     let mut items = Vec::new();
     let mut failures = Vec::new();
     let mut total_bytes = 0usize;

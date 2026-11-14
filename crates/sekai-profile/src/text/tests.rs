@@ -98,6 +98,52 @@ fn layout_ops(
     )
 }
 
+#[test]
+fn page_layout_cache_reuses_layout_but_emits_the_current_transform() {
+    let Some(md) = layout_test_md() else {
+        return;
+    };
+    let mut element = layout_test_element("Cache AB", 24.0, 0.0, 1);
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let translated = [1.0, 0.0, 0.0, 1.0, 19.0, -7.0];
+    let capture = |affine, text: &crate::types::TextElement| {
+        let mut glyphs = Vec::new();
+        super::capture_text_sdf_from_affine(affine, text, &md, None, &mut |glyph| {
+            glyphs.push(glyph.expect("glyph"))
+        });
+        glyphs
+    };
+    let expected = capture(translated, &element);
+    super::with_page_text_layout_cache(|| {
+        let first = capture(identity, &element);
+        assert!(!first.is_empty());
+        let saved = super::PAGE_TEXT_LAYOUTS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("page cache")
+                .values()
+                .next()
+                .expect("layout")
+                .clone()
+        });
+        assert_eq!(capture(translated, &element), expected);
+        super::PAGE_TEXT_LAYOUTS.with(|slot| {
+            let cache = slot.borrow();
+            let cache = cache.as_ref().expect("cache");
+            assert_eq!(cache.len(), 1);
+            assert!(std::rc::Rc::ptr_eq(
+                &saved,
+                cache.values().next().expect("layout")
+            ));
+        });
+    });
+    super::PAGE_TEXT_LAYOUTS.with(|slot| assert!(slot.borrow().is_none()));
+    // Reusing the element's address on another request must not reuse its text.
+    element.text = "Z".into();
+    let expected = capture(identity, &element);
+    super::with_page_text_layout_cache(|| assert_eq!(capture(identity, &element), expected));
+}
+
 fn test_advance(ch: char, size: f32) -> f32 {
     super::freetype_advance_x(None, Some(LAYOUT_TEST_FAMILY), ch, ch, size)
         .expect("test font advance")

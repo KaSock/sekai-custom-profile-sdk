@@ -253,6 +253,7 @@ fn handle_render(
         .missing_keys(|key| assets.contains(key));
 
     let config = RenderConfig {
+        executor: crate::service_executor()?,
         background: if transparent {
             Background::Transparent
         } else {

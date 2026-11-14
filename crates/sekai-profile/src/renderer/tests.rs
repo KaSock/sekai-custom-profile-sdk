@@ -137,6 +137,168 @@ fn realtime_edt_spread_preserves_the_atlas_logical_distance_range() {
     assert_eq!(realtime_edt_sampling_spread(75.0, 0.0, 300.0), None);
 }
 
+// FIX-EDT-01: Reproduce fallback publication between EDT preparation and
+// drawing without relying on thread scheduling or installed font files.
+#[test]
+fn prepared_realtime_edt_pages_follow_the_current_atlas_registry() {
+    use super::capture::{map_captured_sdf_commands, CapturedSdfPrimitive, SdfAtlases};
+    use super::realtime_edt::{RealtimeEdtPreparedBatch, RealtimeEdtPreparedEntry};
+    use crate::sdf::atlas::*;
+    use crate::sdf::tile::{
+        Affine2, MixedSdfAtlasSource, Point2, RuntimeTextSdfPage, SdfAtlasSource, SdfMaterial,
+        SdfTileError, SdfTilePlan, TileGrid,
+    };
+    use sha2::{Digest, Sha256};
+
+    let root = tempfile::tempdir().unwrap();
+    let primary_glyph = SdfAtlasGlyphManifest {
+        codepoint: u32::from('●'),
+        page: 0,
+        rect: [0, 0, 8, 8],
+        plane_bearing: [0.0, 6.0],
+        plane_size: [6.0, 6.0],
+        plane_advance_x: 6.0,
+    };
+    let write_atlas = |family: &str| {
+        let dir = root.path().join(family);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = vec![128u8; SWIZZLED_PAGE_HEADER_BYTES + 64];
+        bytes[..SWIZZLED_PAGE_HEADER_BYTES].fill(0);
+        bytes[..SWIZZLED_PAGE_MAGIC.len()].copy_from_slice(SWIZZLED_PAGE_MAGIC);
+        bytes[12..16].copy_from_slice(&SWIZZLED_PAGE_VERSION.to_le_bytes());
+        for offset in [16, 20, 24, 28] {
+            bytes[offset..offset + 4].copy_from_slice(&8u32.to_le_bytes());
+        }
+        std::fs::write(dir.join("page.r8swz"), &bytes).unwrap();
+        let manifest = SdfAtlasManifest {
+            schema: ATLAS_MANIFEST_SCHEMA.into(),
+            generator_contract: "runtime-registry-regression".into(),
+            font_family: family.into(),
+            font_sha256: "00".repeat(32),
+            point_size: 8.0,
+            spread: 1.0,
+            pages: vec![SdfAtlasPageManifest {
+                file: "page.r8swz".into(),
+                width: 8,
+                height: 8,
+                file_sha256: hex::encode(Sha256::digest(&bytes)),
+            }],
+            glyphs: vec![primary_glyph.clone()],
+            generation: SdfAtlasGenerationReport {
+                cmap_codepoint_count: 1,
+                requested_codepoint_count: 1,
+                generated_glyph_count: 1,
+                failed_glyph_count: 0,
+                analytic_fallback_count: 0,
+                page_width: 8,
+                page_height: 8,
+                gutter: 0,
+                failures: Vec::new(),
+                analytic_fallback_codepoints: Vec::new(),
+            },
+        };
+        let path = dir.join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        Arc::new(MappedSdfAtlas::open(path).unwrap())
+    };
+    let mut atlases = MappedSdfAtlasSet::new();
+    for family in ["runtime-primary", "other-a", "other-b", "other-c"] {
+        atlases.insert(write_atlas(family)).unwrap();
+    }
+    let renderer = CustomProfileRenderer::new(Arc::new(NullProvider));
+    let prepared = Arc::new(RealtimeEdtPreparedBatch {
+        pages: (0..5)
+            .map(|_| RuntimeTextSdfPage::solid_test_page(200))
+            .collect(),
+        entries: std::collections::BTreeMap::from([(
+            realtime_edt_request_key("runtime-primary", '●', 128.0, 16.0),
+            RealtimeEdtPreparedEntry {
+                manifest: SdfAtlasGlyphManifest {
+                    page: 4,
+                    ..primary_glyph.clone()
+                },
+                point_size: 128.0,
+                spread: 16.0,
+            },
+        )]),
+        glyphs: Vec::new(),
+        telemetry: Default::default(),
+    });
+    let captured = [CapturedSdfPrimitive::Text(
+        crate::text::ResolvedTextSdfGlyph {
+            text: "●".into(),
+            font_family: Some("runtime-primary".into()),
+            baseline_origin: Point2::new(32.0, 160.0),
+            font_size: 128.0,
+            local_to_device: Affine2::IDENTITY,
+            material: SdfMaterial::default(),
+        },
+    )];
+    let grid = TileGrid {
+        canvas_width: 256,
+        canvas_height: 256,
+        tile_width: 32,
+        tile_height: 32,
+    };
+    let map = |atlases: &MappedSdfAtlasSet| {
+        let source = MixedSdfAtlasSource::new(atlases, None).unwrap();
+        renderer.with_realtime_edt_batch(Arc::clone(&prepared), || {
+            map_captured_sdf_commands(
+                &captured,
+                SdfAtlases {
+                    text: atlases,
+                    shape: None,
+                    source: &source,
+                },
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        })
+    };
+    let original = map(&atlases);
+    assert_eq!((original[0].atlas_set, original[0].atlas_page), (4, 4));
+    let source = MixedSdfAtlasSource::with_runtime_text(&atlases, None, &prepared.pages).unwrap();
+    SdfTilePlan::build(grid, &original, &source).unwrap();
+
+    // Another page publishes the first fallback font. Its only page is 0;
+    // the old runtime set 4 now names that font, while runtime pages move to 5.
+    atlases
+        .insert(write_atlas(PROFILE_TEXT_FALLBACK_FONT_FAMILY))
+        .unwrap();
+    let source = MixedSdfAtlasSource::with_runtime_text(&atlases, None, &prepared.pages).unwrap();
+    assert!(matches!(
+        SdfTilePlan::build(grid, &original, &source),
+        Err(SdfTileError::MissingAtlasPage {
+            atlas_set: 4,
+            page: 4,
+            ..
+        })
+    ));
+    let remapped = map(&atlases);
+    assert_eq!((remapped[0].atlas_set, remapped[0].atlas_page), (5, 4));
+    assert_eq!(remapped[0].quad, original[0].quad);
+    assert_eq!(
+        source.texel(5, 4, 0, 0),
+        Some(crate::sdf::tile::SdfAtlasTexel::Text(200))
+    );
+    SdfTilePlan::build(grid, &remapped, &source).unwrap();
+
+    // Replacing an existing fallback changes its contents, not registry size.
+    let fallback = Arc::new(
+        MappedSdfAtlas::open(
+            root.path()
+                .join(PROFILE_TEXT_FALLBACK_FONT_FAMILY)
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    );
+    atlases.replace_or_insert(fallback).unwrap();
+    assert_eq!(map(&atlases)[0].atlas_set, 5);
+}
+
 #[test]
 fn non_positive_resolved_text_size_is_an_invisible_sdf_operation() {
     fn glyph(font_size: f32) -> crate::text::ResolvedTextSdfGlyph {

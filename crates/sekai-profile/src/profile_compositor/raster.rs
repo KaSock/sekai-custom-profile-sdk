@@ -298,7 +298,7 @@ pub(super) fn raster_image_command(
         return Ok(RasterImageStats::default());
     }
     let mut stats = RasterImageStats::default();
-    let packet_blend = executor == ImageExecutor::Simd
+    let packet_blend = matches!(executor, ImageExecutor::Simd | ImageExecutor::Avx2)
         && blend_tint
             .iter()
             .all(|value| value.to_bits() == 1.0f32.to_bits());
@@ -308,12 +308,14 @@ pub(super) fn raster_image_command(
     // material are applied before either blender sees the source.
     let direct_source_sampling = alpha_mask.is_none() && badge.is_none();
     #[cfg(target_arch = "x86_64")]
-    let affine_packet_blend = packet_blend
+    let affine_packet_blend = executor == ImageExecutor::Simd
+        && packet_blend
         && direct_source_sampling
         && source.pixels.len() <= i32::MAX as usize
         && source.entry.row_bytes <= i32::MAX as u32;
 
-    if packet_blend
+    if executor == ImageExecutor::Simd
+        && packet_blend
         && direct_source_sampling
         && matrix[0] > 0.0
         && matrix[3] > 0.0
@@ -347,7 +349,13 @@ pub(super) fn raster_image_command(
         let py = y as f32 + pixel_sampling::PIXEL_CENTRE;
         let mut x = x0;
         while x < x1 {
-            let packet_end = x.saturating_add(16).min(x1);
+            let packet_end = x
+                .saturating_add(if executor == ImageExecutor::Avx2 {
+                    8
+                } else {
+                    16
+                })
+                .min(x1);
             #[cfg(target_arch = "x86_64")]
             if affine_packet_blend {
                 let destination_offset = ((y as usize * canvas_width as usize) + x as usize) * 4;
@@ -388,8 +396,25 @@ pub(super) fn raster_image_command(
             }
             let mut source_pixels = [0u32; 16];
             let mut active_mask = 0u16;
+            #[cfg(target_arch = "x86_64")]
+            let coordinates = if executor == ImageExecutor::Avx2 {
+                // SAFETY: the AVX2 scene entry checks AVX2 and FMA. This
+                // computes coordinates only; all source reads remain checked.
+                Some(unsafe { super::avx2::local_coordinates(x, y, &inverse) })
+            } else {
+                None
+            };
             for packet_x in x..packet_end {
                 let px = packet_x as f32 + pixel_sampling::PIXEL_CENTRE;
+                #[cfg(target_arch = "x86_64")]
+                let (local_x, local_y) = coordinates.as_ref().map_or_else(
+                    || transform_point(inverse, px, py),
+                    |(xs, ys)| {
+                        let lane = (packet_x - x) as usize;
+                        (xs[lane], ys[lane])
+                    },
+                );
+                #[cfg(not(target_arch = "x86_64"))]
                 let (local_x, local_y) = transform_point(inverse, px, py);
                 let u = (local_x - bounds.x) / bounds.width;
                 let v = (local_y - bounds.y) / bounds.height;
@@ -439,19 +464,30 @@ pub(super) fn raster_image_command(
                     }
                 })?;
                 #[cfg(target_arch = "x86_64")]
-                // SAFETY: `packet_blend` implies `ImageExecutor::Simd`, which is
-                // only constructed after `is_x86_feature_detected!` has
-                // confirmed `avx512f` and `avx512bw`. `destination_packet`
+                // SAFETY: `packet_blend` implies a packet executor. Its entry
+                // checks AVX2/FMA or AVX-512F/BW before selecting the kernel.
+                // `destination_packet`
                 // starts at pixel `(x, y)` and `active_mask` only sets lanes
                 // below `packet_end - x`, so every selected pixel is inside the
                 // canvas row; `source_pixels` is a local `[u32; 16]`.
                 unsafe {
-                    simd_x86::blend_rgba8_packet(
-                        destination_packet.as_mut_ptr(),
-                        source_pixels.as_ptr(),
-                        active_mask,
-                        blend_mode,
-                    );
+                    if executor == ImageExecutor::Avx2 {
+                        // SAFETY: AVX2 is checked by the scene entry; active
+                        // bits select only validated pixels in this row.
+                        super::avx2::blend_rgba8_packet(
+                            destination_packet.as_mut_ptr(),
+                            source_pixels.as_ptr(),
+                            active_mask,
+                            blend_mode,
+                        );
+                    } else {
+                        simd_x86::blend_rgba8_packet(
+                            destination_packet.as_mut_ptr(),
+                            source_pixels.as_ptr(),
+                            active_mask,
+                            blend_mode,
+                        );
+                    }
                 }
                 stats.simd_packets = stats.simd_packets.saturating_add(1);
             } else {

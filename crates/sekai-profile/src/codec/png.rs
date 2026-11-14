@@ -469,6 +469,50 @@ fn filter_scanlines(height: u32, pixels: &[u8], stride: usize) -> Vec<u8> {
 }
 
 pub fn encode_rgba(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, CodecError> {
+    encode_rgba_mode(width, height, pixels, false)
+}
+
+/// PERF-04: Final page output uses one DEFLATE pass and only Sub/Up filter
+/// candidates. Offline asset writers retain the existing size-oriented mode.
+pub fn encode_rgba_fast(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, CodecError> {
+    encode_rgba_mode(width, height, pixels, true)
+}
+
+fn fast_scanlines(height: u32, pixels: &[u8], stride: usize) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((stride + 1) * height as usize);
+    let mut sub = vec![0u8; stride];
+    let mut up = vec![0u8; stride];
+    for y in 0..height as usize {
+        let row = &pixels[y * stride..(y + 1) * stride];
+        let mut sub_score = 0u64;
+        let mut up_score = 0u64;
+        for x in 0..stride {
+            sub[x] = row[x].wrapping_sub(if x >= 4 { row[x - 4] } else { 0 });
+            up[x] = row[x].wrapping_sub(if y > 0 {
+                pixels[(y - 1) * stride + x]
+            } else {
+                0
+            });
+            sub_score += u64::from(sub[x].wrapping_add(128).abs_diff(128));
+            up_score += u64::from(up[x].wrapping_add(128).abs_diff(128));
+        }
+        if sub_score <= up_score {
+            raw.push(1);
+            raw.extend_from_slice(&sub);
+        } else {
+            raw.push(2);
+            raw.extend_from_slice(&up);
+        }
+    }
+    raw
+}
+
+fn encode_rgba_mode(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    fast: bool,
+) -> Result<Vec<u8>, CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::Format("zero-sized image"));
     }
@@ -489,21 +533,26 @@ pub fn encode_rgba(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, Co
     // one extra DEFLATE pass and removes the guess. The two passes are
     // independent, so they run concurrently when a pool is available; the
     // selected bytes are identical either way.
-    #[cfg(feature = "parallel")]
-    let (stored, filtered) = rayon::join(
-        || zlib_compress(&store_scanlines(height, pixels, stride)),
-        || zlib_compress(&filter_scanlines(height, pixels, stride)),
-    );
-    #[cfg(not(feature = "parallel"))]
-    let (stored, filtered) = (
-        zlib_compress(&store_scanlines(height, pixels, stride)),
-        zlib_compress(&filter_scanlines(height, pixels, stride)),
-    );
-    let (stored, filtered) = (stored?, filtered?);
-    let compressed = if filtered.len() < stored.len() {
-        filtered
+    let compressed = if fast {
+        zlib_compress(&fast_scanlines(height, pixels, stride))?
     } else {
-        stored
+        #[cfg(feature = "parallel")]
+        let (stored, filtered) = rayon::join(
+            || zlib_compress(&store_scanlines(height, pixels, stride)),
+            || zlib_compress(&filter_scanlines(height, pixels, stride)),
+        );
+        #[cfg(not(feature = "parallel"))]
+        let (stored, filtered) = (
+            zlib_compress(&store_scanlines(height, pixels, stride)),
+            zlib_compress(&filter_scanlines(height, pixels, stride)),
+        );
+        let (stored, filtered) = (stored?, filtered?);
+        let compressed = if filtered.len() < stored.len() {
+            filtered
+        } else {
+            stored
+        };
+        compressed
     };
 
     let mut out = Vec::with_capacity(compressed.len() + 128);

@@ -62,7 +62,7 @@ draws that are missing are reported and drawn transparent.
 | `--format <png\|jpeg>` | from the extension | Output format; `.png`, `.jpg` and `.jpeg` are recognised |
 | `--transparent` | | Keep the background transparent (PNG only) |
 | `--quality <1-100>` | `90` | JPEG quality; ignored for PNG |
-| `--executor <auto\|simd\|scalar>` | `auto` | SDF executor; `auto` uses AVX-512 when the CPU supports it, `simd` fails on a CPU without AVX-512 F, BW and VBMI plus FMA |
+| `--executor <auto\|simd\|avx2\|scalar>` | `auto` | SDF executor; `auto` prefers AVX-512, then AVX2/FMA, then scalar. `simd` requires AVX-512 F/BW/VBMI and FMA; `avx2` requires AVX2/FMA. |
 
 The masterdata and asset flags below also apply.
 

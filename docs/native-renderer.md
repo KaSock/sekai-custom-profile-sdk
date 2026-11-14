@@ -92,7 +92,10 @@ page of a card list with the same calls.
 (`premultiplied_rgba`), its size, its background, and the `telemetry` of the
 render.
 
-- `to_png` encodes a straight-alpha PNG.
+- `to_png` encodes a straight-alpha PNG. It defaults to one compression pass
+  with Sub/Up row filters; `SEKAI_PROFILE_PNG_MODE=small` restores the original
+  two-candidate size-oriented encoder. Both are lossless; encoded bytes and
+  file size can differ.
 - `to_jpeg(quality)` encodes a baseline JPEG; it needs the `jpeg-turbo`
   feature.
 - `CustomProfileRenderer::encode_png` and `encode_jpeg` consume the page,
@@ -109,12 +112,14 @@ A page with a transparent background encodes to PNG only.
 
 | Field | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `executor` | `Auto`, `Simd`, `Scalar` | `Auto` | `Auto` runs `Simd` when the CPU supports it. `Simd` needs an x86-64 CPU with AVX-512 F, BW and VBMI, and FMA. |
+| `executor` | `Auto`, `Simd`, `Avx2`, `Scalar` | `Auto` | `Auto` prefers `Simd`, then `Avx2`, then `Scalar`. `Simd` needs AVX-512 F/BW/VBMI and FMA; `Avx2` needs AVX2 and FMA. Features are checked at runtime. |
 | `background` | `White`, `Transparent` | `White` | A transparent page encodes to PNG only. |
 | `tile_width` / `tile_height` | A power of two from 8 to 128 | `32` | The SDF executor works on tiles of this size. |
 | `pixel_occlusion` | `Off`, `Measure`, `Cull` | `Off` | `Measure` counts the SDF pixels that later opaque images of the render-object store cover and reports the count in the telemetry; `Cull` skips drawing them. Neither changes the rendered pixels. |
 
 `sdf_simd_available()` reports whether this CPU runs `SdfExecutor::Simd`.
+`sdf_avx2_available()` reports AVX2/FMA support. The `simd` field of
+`RenderCapabilities` continues to mean AVX-512 support.
 
 ## Errors and capabilities
 
@@ -122,6 +127,7 @@ A page with a transparent background encodes to PNG only.
 
 - `InvalidTileSize` names the rejected tile size;
 - `SimdUnavailable` means the config asks for `Simd` on a CPU without it;
+- `Avx2Unavailable` means the config asks for `Avx2` without AVX2/FMA support;
 - `Render` carries the message of a failure during the render itself.
 
 `CustomProfileRenderer::capabilities` returns `RenderCapabilities`: whether
@@ -235,6 +241,9 @@ commands within each band retain their original drawing order.
 
 | Variable | Effect |
 | --- | --- |
+| `SEKAI_PROFILE_DECODED_CACHE_MB` | Extra LRU budget for decoded premultiplied image pixels and retained encoded generations, in MiB. Defaults to the encoded budget passed to `AssetStore::new`; `0` disables decoded retention. Read at store creation. |
+| `SEKAI_PROFILE_PNG_MODE` | `small` selects the original final-page PNG encoder; otherwise use the faster single-compression-pass encoder. Offline asset writers retain the original encoder. |
+| `SEKAI_PROFILE_EXECUTOR` | CLI `serve` / BOT requests: `auto` (default), `scalar`, `avx2`, or `simd`. Invalid values fail the render. Library callers use `RenderConfig`; CLI `render` uses `--executor`. |
 | `SEKAI_PROFILE_FONT_DIR` | Font directory searched after the directories given to `set_font_dirs` |
 | `FONT_DIR` | Font directory searched after `SEKAI_PROFILE_FONT_DIR`; `assets/fonts` is searched last |
 | `SEKAI_PROFILE_SDF_EDT` | `1` to `4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
@@ -243,3 +252,6 @@ commands within each band retain their original drawing order.
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true` or `yes` emits `tracing` debug events for TMP layout probes and text codepoints |
 
 The command line also reads `SEKAI_PROFILE_ATLAS_DIR`; see [command line](cli.md).
+
+For implementation locations and deployment comparisons, see the
+[native performance change notes](native-performance.zh-CN.md).

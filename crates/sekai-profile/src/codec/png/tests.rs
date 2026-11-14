@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn fast_output_round_trips_alpha_and_rejects_invalid_sizes() {
+    for (width, height) in [(1, 1), (1, 17), (61, 37)] {
+        let pixels = gradient(width, height);
+        let encoded = encode_rgba_fast(width, height, &pixels).expect("fast PNG");
+        let decoded = decode(&encoded).expect("decode fast PNG");
+        assert_eq!((decoded.width, decoded.height), (width, height));
+        assert_eq!(decoded.pixels, pixels);
+    }
+    assert!(encode_rgba_fast(0, 1, &[]).is_err());
+    assert!(encode_rgba_fast(1, 0, &[]).is_err());
+    assert!(encode_rgba_fast(2, 1, &[0; 4]).is_err());
+}
+
 fn gradient(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {

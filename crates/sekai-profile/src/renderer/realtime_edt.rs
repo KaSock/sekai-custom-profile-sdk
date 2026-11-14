@@ -89,7 +89,8 @@ pub(super) struct RealtimeEdtRequestKey {
 
 #[derive(Clone)]
 pub(super) struct RealtimeEdtPreparedEntry {
-    pub(super) atlas_set: u16,
+    // FIX-EDT-01: The manifest page is batch-local. The atlas set is resolved
+    // when drawing, because concurrent fallback publication can shift it.
     pub(super) manifest: crate::sdf::atlas::SdfAtlasGlyphManifest,
     pub(super) point_size: f32,
     pub(super) spread: f32,

@@ -669,6 +669,28 @@ struct TextLayoutRun {
     timings: TextSdfCaptureTimings,
 }
 
+// PERF-02: Keep immutable layouts only for the current page render. EDT demand
+// capture and final drawing share these operations, while transforms are still
+// applied at emission time. No layout survives a request or atlas replacement.
+type TextLayoutKey = (usize, usize, usize);
+type TextLayoutCache = std::collections::HashMap<TextLayoutKey, std::rc::Rc<TextLayoutRun>>;
+thread_local! {
+    static PAGE_TEXT_LAYOUTS: std::cell::RefCell<Option<TextLayoutCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_page_text_layout_cache<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<TextLayoutCache>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PAGE_TEXT_LAYOUTS.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let previous = PAGE_TEXT_LAYOUTS.with(|slot| slot.borrow_mut().replace(TextLayoutCache::new()));
+    let _restore = Restore(previous);
+    run()
+}
+
 /// Captures the element-path TMP layout (no post-layout placement) against a
 /// device transform supplied directly as an affine.
 pub(crate) fn capture_text_sdf_from_affine(
@@ -678,12 +700,38 @@ pub(crate) fn capture_text_sdf_from_affine(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> TextSdfCaptureTimings {
-    let mut run = match layout_text_ops(text, md, None, atlases, None, true) {
-        Ok(run) => run,
-        Err(error) => {
-            observer(Err(error));
-            return TextSdfCaptureTimings::default();
-        }
+    let key = (
+        text as *const TextElement as usize,
+        md as *const MasterData as usize,
+        atlases.map_or(0, |atlas| atlas as *const _ as usize),
+    );
+    let cached = PAGE_TEXT_LAYOUTS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&key).cloned())
+    });
+    let cache_hit = cached.is_some();
+    let run = if let Some(run) = cached {
+        run
+    } else {
+        let run = match layout_text_ops(text, md, None, atlases, None, true) {
+            Ok(run) => std::rc::Rc::new(run),
+            Err(error) => {
+                observer(Err(error));
+                return TextSdfCaptureTimings::default();
+            }
+        };
+        PAGE_TEXT_LAYOUTS.with(|slot| {
+            if let Some(cache) = slot.borrow_mut().as_mut() {
+                cache.insert(key, std::rc::Rc::clone(&run));
+            }
+        });
+        run
+    };
+    let mut timings = if cache_hit {
+        TextSdfCaptureTimings::default()
+    } else {
+        run.timings
     };
     let emit_started = Some(std::time::Instant::now());
     for op in &run.draw_ops {
@@ -696,8 +744,8 @@ pub(crate) fn capture_text_sdf_from_affine(
             run.font_family.as_deref(),
         ));
     }
-    run.timings.emit_ns = capture_elapsed_ns(emit_started);
-    run.timings
+    timings.emit_ns = capture_elapsed_ns(emit_started);
+    timings
 }
 
 /// Captures the production region-font-only TMP layout with the same

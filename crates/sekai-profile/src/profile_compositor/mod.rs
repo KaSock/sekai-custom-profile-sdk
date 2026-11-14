@@ -17,6 +17,8 @@ use crate::assets::AssetStore;
 use crate::masterdata::MasterData;
 use crate::render_object::{MappedRenderObject, MappedRenderObjectStore, RenderObjectEntry};
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 mod blend;
 mod cache_variants;
 /// Reusable image and shape drawing on the same compositor.
@@ -34,6 +36,8 @@ pub use self::cache_variants::{
     build_deck_art_variant_simd, build_general_base_objects_simd, deck_art_variant_identity,
     deck_art_variant_identity_from_source,
 };
+pub(crate) use self::scene::render_authored_profile_indexed;
+pub use self::scene::render_authored_profile_into_avx2;
 pub use self::scene::{
     authored_image_is_exact_opaque_mask_source, render_authored_image_into_simd,
     render_authored_profile_into_scalar, render_authored_profile_into_simd,
@@ -42,6 +46,7 @@ pub use self::scene::{
 
 use self::blend::*;
 use self::cache_variants::*;
+pub(crate) use self::commands::ProfileSceneIndex;
 use self::commands::*;
 use self::raster::*;
 use self::semantic_text::*;
@@ -266,6 +271,7 @@ struct CompositionBounds {
 enum ImageExecutor {
     Scalar,
     Simd,
+    Avx2,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -362,14 +368,14 @@ struct SemanticShape<'a> {
 
 struct OwnedRenderObject {
     entry: RenderObjectEntry,
-    pixels: Vec<u8>,
+    pixels: std::sync::Arc<crate::assets::DecodedAsset>,
 }
 
 impl OwnedRenderObject {
     fn mapped(&self) -> MappedRenderObject<'_> {
         MappedRenderObject {
             entry: &self.entry,
-            pixels: &self.pixels,
+            pixels: &self.pixels.pixels,
         }
     }
 }

@@ -8,9 +8,10 @@ use sekai_profile_core::{AuthoredElementKind, BlendMode, SemanticCommandPayload,
 
 use super::{
     canvas_bytes, collect_layers, compose_matrix, evaluate_command_control_state,
-    render_image_commands_into, transform_point, try_render_general_base_into, unsupported,
-    CommandFilter, CompositorSources, GeneralBaseAttempt, ImageExecutor, ProfileCompositorError,
-    ProfileCompositorOutput, ProfileCompositorStats, RgbaSurface, PROFILE_COMPOSITOR_SCHEMA,
+    render_image_commands_indexed, render_image_commands_into, transform_point,
+    try_render_general_base_into, unsupported, CommandFilter, CompositorSources,
+    GeneralBaseAttempt, ImageExecutor, ProfileCompositorError, ProfileCompositorOutput,
+    ProfileCompositorStats, ProfileSceneIndex, RgbaSurface, PROFILE_COMPOSITOR_SCHEMA,
 };
 use crate::render_object::MappedRenderObjectStore;
 
@@ -126,11 +127,36 @@ pub fn render_authored_profile_into_simd(
         authored_index,
         surface,
         ImageExecutor::Simd,
+        None,
+    )
+}
+
+/// PERF-03: AVX2/FMA packet rendering of one authored element, with checked
+/// source sampling and the scalar compositor's premultiplied pixel contract.
+pub fn render_authored_profile_into_avx2(
+    scene: &ResolvedProfileScene,
+    sources: CompositorSources<'_>,
+    authored_kind: AuthoredElementKind,
+    authored_index: u32,
+    surface: RgbaSurface<'_>,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+    if !crate::render_config::sdf_avx2_available() {
+        return unsupported("profile-compositor", "AVX2+FMA packet executor");
+    }
+    render_authored_profile_into(
+        scene,
+        sources,
+        authored_kind,
+        authored_index,
+        surface,
+        ImageExecutor::Avx2,
+        None,
     )
 }
 
 /// Scalar-executor twin of [`render_authored_profile_into_simd`], for hosts
 /// without the packet instruction set. Byte-equal output; slower.
+/// Scalar entry point with the same pixel contract as both packet executors.
 pub fn render_authored_profile_into_scalar(
     scene: &ResolvedProfileScene,
     sources: CompositorSources<'_>,
@@ -145,6 +171,7 @@ pub fn render_authored_profile_into_scalar(
         authored_index,
         surface,
         ImageExecutor::Scalar,
+        None,
     )
 }
 
@@ -173,6 +200,7 @@ fn authored_layer_ids(
 
 /// Composites the commands of one authored element into `surface`, from its
 /// baked General base when one applies.
+#[allow(clippy::too_many_arguments)]
 fn render_authored_profile_into(
     scene: &ResolvedProfileScene,
     sources: CompositorSources<'_>,
@@ -180,8 +208,16 @@ fn render_authored_profile_into(
     authored_index: u32,
     mut surface: RgbaSurface<'_>,
     executor: ImageExecutor,
+    index: Option<&ProfileSceneIndex<'_>>,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
-    let layer_ids = authored_layer_ids(scene, authored_kind, authored_index)?;
+    let indexed = index.and_then(|index| index.authored.get(&(authored_kind, authored_index)));
+    let owned_layer_ids;
+    let layer_ids = if let Some((layers, _)) = indexed {
+        layers
+    } else {
+        owned_layer_ids = authored_layer_ids(scene, authored_kind, authored_index)?;
+        &owned_layer_ids
+    };
     let mut general_base_miss = false;
     if authored_kind == AuthoredElementKind::General {
         match try_render_general_base_into(
@@ -196,18 +232,43 @@ fn render_authored_profile_into(
             GeneralBaseAttempt::NotEligible => {}
         }
     }
-    let mut stats = render_image_commands_into(
+    let mut stats = render_image_commands_indexed(
         scene,
         sources,
         CommandFilter {
-            layers: Some(&layer_ids),
+            layers: Some(layer_ids),
             commands: None,
         },
         surface,
         executor,
+        index,
+        indexed.map(|(_, commands)| commands.as_slice()),
     )?;
     stats.general_base_miss_count = u64::from(general_base_miss);
     Ok(stats)
+}
+
+pub(crate) fn render_authored_profile_indexed(
+    scene: &ResolvedProfileScene,
+    sources: CompositorSources<'_>,
+    authored: (AuthoredElementKind, u32),
+    surface: RgbaSurface<'_>,
+    executor: crate::render_config::Executor,
+    index: Option<&ProfileSceneIndex<'_>>,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+    let executor = match executor {
+        crate::render_config::Executor::Scalar => ImageExecutor::Scalar,
+        crate::render_config::Executor::Avx2 if crate::render_config::sdf_avx2_available() => {
+            ImageExecutor::Avx2
+        }
+        crate::render_config::Executor::Simd if crate::render_config::sdf_simd_available() => {
+            ImageExecutor::Simd
+        }
+        _ => return unsupported("profile-compositor", "requested CPU executor"),
+    };
+    render_authored_profile_into(
+        scene, sources, authored.0, authored.1, surface, executor, index,
+    )
 }
 
 /// Returns true only when an authored element is a non-empty sequence of

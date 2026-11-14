@@ -12,13 +12,15 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SdfExecutor {
-    /// [`SdfExecutor::Simd`] when the CPU supports it, otherwise
-    /// [`SdfExecutor::Scalar`].
+    /// Chooses [`SdfExecutor::Simd`] when available, then [`SdfExecutor::Avx2`],
+    /// then [`SdfExecutor::Scalar`], based on the executing CPU and OS.
     #[default]
     Auto,
     /// The AVX-512 packet executor. It needs an x86-64 CPU with AVX-512 F,
     /// BW and VBMI, and FMA.
     Simd,
+    /// Eight-lane AVX2/FMA executor, including Broadwell Xeon processors.
+    Avx2,
     /// The portable scalar executor.
     Scalar,
 }
@@ -99,7 +101,18 @@ impl Default for RenderConfig {
 impl RenderConfig {
     /// Checks the config and resolves [`SdfExecutor::Auto`] for a CPU that
     /// does or does not support the SIMD executor.
+    /// AVX2/FMA support is detected on the executing host.
     pub(crate) fn resolve(&self, simd_available: bool) -> Result<Executor, RenderError> {
+        self.resolve_features(simd_available, sdf_avx2_available())
+    }
+
+    // PERF-03: Runtime dispatch keeps the executable portable between the build
+    // host and deployment host; no target-cpu=native build flag is required.
+    fn resolve_features(
+        &self,
+        simd_available: bool,
+        avx2_available: bool,
+    ) -> Result<Executor, RenderError> {
         let tile_ok = |edge: u16| (8..=128).contains(&edge) && edge.is_power_of_two();
         if !tile_ok(self.tile_width) || !tile_ok(self.tile_height) {
             return Err(RenderError::InvalidTileSize {
@@ -109,9 +122,11 @@ impl RenderConfig {
         }
         match self.executor {
             SdfExecutor::Auto if simd_available => Ok(Executor::Simd),
+            SdfExecutor::Auto | SdfExecutor::Avx2 if avx2_available => Ok(Executor::Avx2),
             SdfExecutor::Auto | SdfExecutor::Scalar => Ok(Executor::Scalar),
             SdfExecutor::Simd if simd_available => Ok(Executor::Simd),
             SdfExecutor::Simd => Err(RenderError::SimdUnavailable),
+            SdfExecutor::Avx2 => Err(RenderError::Avx2Unavailable),
         }
     }
 }
@@ -121,6 +136,7 @@ impl RenderConfig {
 pub(crate) enum Executor {
     Scalar,
     Simd,
+    Avx2,
 }
 
 impl Executor {
@@ -128,7 +144,20 @@ impl Executor {
         match self {
             Self::Scalar => SdfExecutor::Scalar,
             Self::Simd => SdfExecutor::Simd,
+            Self::Avx2 => SdfExecutor::Avx2,
         }
+    }
+}
+
+/// Whether this CPU and operating system support the AVX2/FMA executor.
+pub fn sdf_avx2_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
     }
 }
 
@@ -158,6 +187,7 @@ pub struct RenderCapabilities {
     pub shape_atlas: bool,
     /// A render-object store is installed. Without one, images are decoded
     /// from the asset store during each render.
+    /// Decoded source pixels are retained in a separate byte-budgeted cache.
     pub render_objects: bool,
     /// A fallback glyph cache is installed, so characters the card fonts
     /// lack are drawn from the fallback face.
@@ -167,6 +197,9 @@ pub struct RenderCapabilities {
 /// Why a render, or the encoding of its page, failed.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum RenderError {
+    /// AVX2 was requested on a host without AVX2 and FMA.
+    #[error("the AVX2 executor needs an x86-64 CPU with AVX2 and FMA")]
+    Avx2Unavailable,
     /// [`RenderConfig::tile_width`] or [`RenderConfig::tile_height`] is not a
     /// power of two from 8 to 128.
     #[error("invalid SDF tile size {width}x{height}; expected powers of two from 8 to 128")]
@@ -200,8 +233,28 @@ mod tests {
     fn the_default_config_renders_white_on_the_best_executor() {
         let config = RenderConfig::default();
         assert_eq!(config.background, Background::White);
-        assert_eq!(config.resolve(true), Ok(Executor::Simd));
-        assert_eq!(config.resolve(false), Ok(Executor::Scalar));
+        assert_eq!(config.resolve_features(true, true), Ok(Executor::Simd));
+        assert_eq!(config.resolve_features(true, false), Ok(Executor::Simd));
+        assert_eq!(config.resolve_features(false, true), Ok(Executor::Avx2));
+        assert_eq!(config.resolve_features(false, false), Ok(Executor::Scalar));
+    }
+
+    #[test]
+    fn explicit_avx2_requires_avx2_even_when_avx512_is_available() {
+        let config = RenderConfig {
+            executor: SdfExecutor::Avx2,
+            ..RenderConfig::default()
+        };
+        assert_eq!(config.resolve_features(false, true), Ok(Executor::Avx2));
+        assert_eq!(config.resolve_features(true, true), Ok(Executor::Avx2));
+        assert_eq!(
+            config.resolve_features(true, false),
+            Err(RenderError::Avx2Unavailable)
+        );
+        assert_eq!(
+            config.resolve_features(false, false),
+            Err(RenderError::Avx2Unavailable)
+        );
     }
 
     #[test]

@@ -9,7 +9,6 @@ use sekai_profile_core::{
     BlendMode, CompositeOperation, ImageMaterial, LayerSource, Matrix2d, ParameterValue, Rect,
     ResourceKey, SemanticCommandPayload, SemanticCommandSource, ShapePrimitive, StableId,
 };
-use sha2::{Digest, Sha256};
 
 use super::ugui_text;
 use super::{
@@ -40,6 +39,39 @@ impl CommandFilter<'_> {
             && self
                 .commands
                 .is_none_or(|commands| commands.contains(&command.id))
+    }
+}
+
+// PERF-02: Build layer and authored-element command indices once per surface.
+// Commands remain in their original order, including isolation boundaries.
+pub(crate) struct ProfileSceneIndex<'a> {
+    pub(super) layers: BTreeMap<StableId, &'a LayerSource>,
+    pub(super) authored:
+        BTreeMap<(sekai_profile_core::AuthoredElementKind, u32), (BTreeSet<StableId>, Vec<usize>)>,
+}
+
+impl<'a> ProfileSceneIndex<'a> {
+    pub(crate) fn new(scene: &'a ResolvedProfileScene) -> Result<Self, ProfileCompositorError> {
+        let layers = collect_layers(scene)?;
+        let mut authored = BTreeMap::new();
+        for layer in &scene.layers {
+            authored
+                .entry((layer.authored_kind, layer.authored_index))
+                .or_insert_with(|| (BTreeSet::new(), Vec::new()))
+                .0
+                .insert(layer.id);
+        }
+        for (position, command) in scene.commands.iter().enumerate() {
+            let layer = layers.get(&command.layer_id).ok_or_else(|| {
+                ProfileCompositorError::MissingLayer(format!("{:?}", command.layer_id))
+            })?;
+            authored
+                .get_mut(&(layer.authored_kind, layer.authored_index))
+                .expect("indexed layer")
+                .1
+                .push(position);
+        }
+        Ok(Self { layers, authored })
     }
 }
 
@@ -117,6 +149,19 @@ pub(super) fn render_image_commands_into(
     surface: RgbaSurface<'_>,
     executor: ImageExecutor,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+    render_image_commands_indexed(scene, sources, filter, surface, executor, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_image_commands_indexed(
+    scene: &ResolvedProfileScene,
+    sources: CompositorSources<'_>,
+    filter: CommandFilter<'_>,
+    surface: RgbaSurface<'_>,
+    executor: ImageExecutor,
+    index: Option<&ProfileSceneIndex<'_>>,
+    command_indices: Option<&[usize]>,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     let started = Instant::now();
     let CompositorSources {
         store,
@@ -129,7 +174,18 @@ pub(super) fn render_image_commands_into(
         height,
     } = surface;
     let pixel_bytes = destination.len();
-    let layers = collect_layers(scene)?;
+    let owned_layers;
+    let layers = if let Some(index) = index {
+        &index.layers
+    } else {
+        owned_layers = collect_layers(scene)?;
+        &owned_layers
+    };
+    let selected_commands = || {
+        (0..command_indices.map_or(scene.commands.len(), <[usize]>::len)).map(move |position| {
+            &scene.commands[command_indices.map_or(position, |indices| indices[position])]
+        })
+    };
     let mut targets = Vec::<CompositionTarget>::new();
     let mut target_scratch = Vec::<Vec<u8>>::new();
     let mut stats = ProfileCompositorStats {
@@ -141,7 +197,7 @@ pub(super) fn render_image_commands_into(
     if let Some(semantic_sdf) = semantic_sdf {
         let mut text_batch = Vec::new();
         let mut text_only = true;
-        for command in &scene.commands {
+        for command in selected_commands() {
             if !filter.admits(command) {
                 continue;
             }
@@ -183,7 +239,7 @@ pub(super) fn render_image_commands_into(
         }
     }
 
-    for command in &scene.commands {
+    for command in selected_commands() {
         if !filter.admits(command) {
             continue;
         }
@@ -634,18 +690,20 @@ fn load_source_fallback_object(
     if resource.namespace != "assets" && resource.namespace != "static" {
         return Ok(None);
     }
-    let Some((width, height, pixels)) = assets.get_premultiplied_rgba(&resource.key) else {
+    // PERF-01: Hold shared cached pixels through sampling; reuse their hash.
+    let Some(pixels) = assets.get_decoded(&resource.key) else {
         return Ok(None);
     };
+    let (width, height) = (pixels.width, pixels.height);
     let row_bytes = usize::try_from(width)
         .ok()
         .and_then(|value| value.checked_mul(4))
         .ok_or_else(|| ProfileCompositorError::InvalidObject(resource.key.clone()))?;
-    if pixels.len() != row_bytes.saturating_mul(height as usize) {
+    if pixels.pixels.len() != row_bytes.saturating_mul(height as usize) {
         return Err(ProfileCompositorError::InvalidObject(resource.key.clone()));
     }
     let object_key = render_object_key_for_resource(resource);
-    let pixel_sha256 = hex::encode(Sha256::digest(&pixels));
+    let pixel_sha256 = pixels.pixel_sha256.clone();
     Ok(Some(OwnedRenderObject {
         entry: RenderObjectEntry {
             key: object_key,
@@ -653,7 +711,7 @@ fn load_source_fallback_object(
             source_sha256: pixel_sha256.clone(),
             page: 0,
             offset: 0,
-            length: pixels.len() as u64,
+            length: pixels.pixels.len() as u64,
             width,
             height,
             row_bytes: row_bytes as u32,

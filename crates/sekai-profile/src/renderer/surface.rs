@@ -29,6 +29,27 @@ impl CustomProfileRenderer {
         pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
         render_object_store: &crate::render_object::MappedRenderObjectStore,
     ) -> Result<SurfaceOutput, String> {
+        crate::text::with_page_text_layout_cache(|| {
+            self.render_full_card_cached(
+                card,
+                profile,
+                pass,
+                clear_rgba,
+                pre_resolved_scene,
+                render_object_store,
+            )
+        })
+    }
+
+    fn render_full_card_cached(
+        &self,
+        card: &CustomProfileCard,
+        profile: Option<&crate::profile::ProfileData>,
+        pass: SdfPass,
+        clear_rgba: [u8; 4],
+        pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
+        render_object_store: &crate::render_object::MappedRenderObjectStore,
+    ) -> Result<SurfaceOutput, String> {
         let md = self.snapshot();
         let sources = CardSources {
             md: &md,
@@ -90,6 +111,9 @@ impl CustomProfileRenderer {
         let semantic_scene = pre_resolved_scene
             .or(resolved_scene.as_ref())
             .ok_or_else(|| "the page scene was not resolved".to_string())?;
+        // PERF-02: Resolve layer lookup and ordered command subsets once per page.
+        let scene_index = crate::profile_compositor::ProfileSceneIndex::new(semantic_scene)
+            .map_err(|error| error.to_string())?;
         let semantic_resolve_ns = elapsed_ns(semantic_resolve_started);
         let surface_started = std::time::Instant::now();
         let width = spec.surface_width;
@@ -310,6 +334,7 @@ impl CustomProfileRenderer {
                         // The image compositor follows the page's executor
                         // choice so a scalar host runs a scalar pipeline.
                         pass.executor,
+                        Some(&scene_index),
                     )?;
                     aggregate.software_image_count =
                         aggregate.software_image_count.saturating_add(1);

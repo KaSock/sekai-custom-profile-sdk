@@ -117,6 +117,15 @@ pub(crate) struct RuntimeTextSdfPage {
 }
 
 impl RuntimeTextSdfPage {
+    #[cfg(test)]
+    pub(crate) fn solid_test_page(value: u8) -> Self {
+        Self {
+            width: 8,
+            height: 8,
+            payload: vec![value; 64],
+        }
+    }
+
     pub(crate) fn resident_bytes(&self) -> u64 {
         self.payload.len() as u64
     }

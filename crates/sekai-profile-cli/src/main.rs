@@ -143,6 +143,7 @@ struct RenderArgs {
     quality: u8,
     /// SDF executor; `auto` uses AVX-512 when the CPU supports it, and
     /// `simd` fails on a CPU without AVX-512 F, BW and VBMI plus FMA
+    /// `auto` falls back to AVX2/FMA, then scalar; `avx2` requires AVX2/FMA
     #[arg(long, value_enum, default_value_t = Executor::Auto)]
     executor: Executor,
 }
@@ -207,6 +208,7 @@ impl OutputFormat {
 enum Executor {
     Auto,
     Simd,
+    Avx2,
     Scalar,
 }
 
@@ -215,6 +217,7 @@ impl From<Executor> for SdfExecutor {
         match executor {
             Executor::Auto => Self::Auto,
             Executor::Simd => Self::Simd,
+            Executor::Avx2 => Self::Avx2,
             Executor::Scalar => Self::Scalar,
         }
     }
@@ -428,6 +431,22 @@ pub(crate) fn asset_plan(
         .map_err(|error| format!("resolve page asset plan: {error}"))
 }
 
+// PERF-03: Services can compare executors on the deployment host without
+// rebuilding or changing the BOT. The CLI render command keeps its own flag.
+pub(crate) fn service_executor() -> Result<SdfExecutor, String> {
+    match std::env::var("SEKAI_PROFILE_EXECUTOR") {
+        Err(std::env::VarError::NotPresent) => Ok(SdfExecutor::Auto),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(SdfExecutor::Auto),
+            "scalar" => Ok(SdfExecutor::Scalar),
+            "avx2" => Ok(SdfExecutor::Avx2),
+            "simd" => Ok(SdfExecutor::Simd),
+            _ => Err("SEKAI_PROFILE_EXECUTOR must be auto, scalar, avx2 or simd".into()),
+        },
+        Err(error) => Err(format!("invalid SEKAI_PROFILE_EXECUTOR: {error}")),
+    }
+}
+
 /// Renders `card` and encodes it.
 pub(crate) fn render_page(
     renderer: &CustomProfileRenderer,
@@ -441,23 +460,45 @@ pub(crate) fn render_page(
         .render(card, profile, config)
         .map_err(|error| error.to_string())?;
     match format {
-        OutputFormat::Png => page.to_png(),
+        // PERF-05: Consuming encoders recycle the page allocation for the next
+        // request instead of dropping it after every BOT/serve response.
+        OutputFormat::Png => renderer
+            .encode_png(page)
+            .map(|encoded| encoded.bytes)
+            .map_err(|error| error.to_string()),
         OutputFormat::Jpeg => {
             if config.background == Background::Transparent {
                 return Err("JPEG has no transparency; write a PNG".into());
             }
-            encode_jpeg(&page, quality)
+            encode_jpeg(renderer, page, quality)
         }
     }
 }
 
 #[cfg(feature = "jpeg-turbo")]
-fn encode_jpeg(page: &sekai_profile::RenderedPage, quality: u8) -> Result<Vec<u8>, String> {
-    page.to_jpeg(quality)
+fn encode_jpeg(
+    renderer: &CustomProfileRenderer,
+    page: sekai_profile::RenderedPage,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    renderer
+        .encode_jpeg(
+            page,
+            sekai_profile::JpegOptions {
+                quality,
+                ..Default::default()
+            },
+        )
+        .map(|encoded| encoded.bytes)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(not(feature = "jpeg-turbo"))]
-fn encode_jpeg(_page: &sekai_profile::RenderedPage, _quality: u8) -> Result<Vec<u8>, String> {
+fn encode_jpeg(
+    _renderer: &CustomProfileRenderer,
+    _page: sekai_profile::RenderedPage,
+    _quality: u8,
+) -> Result<Vec<u8>, String> {
     Err("this build has no JPEG encoder; write a PNG or build with the jpeg-turbo feature".into())
 }
 

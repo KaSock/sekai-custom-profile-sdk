@@ -46,6 +46,8 @@ impl RenderedPage {
     }
 
     /// Encodes the page as an RGBA PNG of its straight pixels.
+    /// PERF-04: Fast lossless output is the default. Set
+    /// `SEKAI_PROFILE_PNG_MODE=small` to use the original size-oriented mode.
     ///
     /// To keep the pixel buffer for the next render, use
     /// [`CustomProfileRenderer::encode_png`](crate::CustomProfileRenderer::encode_png)
@@ -55,7 +57,12 @@ impl RenderedPage {
     ///
     /// Returns a message when PNG encoding fails.
     pub fn to_png(&self) -> Result<Vec<u8>, String> {
-        crate::codec::png::encode_rgba(self.width, self.height, &self.to_straight_rgba())
+        let encode = if std::env::var("SEKAI_PROFILE_PNG_MODE").as_deref() == Ok("small") {
+            crate::codec::png::encode_rgba
+        } else {
+            crate::codec::png::encode_rgba_fast
+        };
+        encode(self.width, self.height, &self.to_straight_rgba())
             .map_err(|error| format!("PNG encoding failed: {error}"))
     }
 

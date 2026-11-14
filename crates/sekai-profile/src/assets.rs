@@ -6,12 +6,15 @@
 //!
 //! Pixels are decoded on demand by `crate::codec` and premultiplied as
 //! `round(value * alpha / 255)` (see [`crate::codec::premultiply_channel`]).
+//! A separate LRU retains decoded pixels and their SHA-256 with its own byte
+//! budget, set by `SEKAI_PROFILE_DECODED_CACHE_MB` (default: the encoded budget).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use lru::LruCache;
+use sha2::{Digest, Sha256};
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -168,6 +171,59 @@ pub struct AssetStore {
     /// Pinned encoded bytes of static assets, outside the LRU and the budget.
     pinned_bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
+    decoded: Mutex<DecodedLru>,
+}
+
+// PERF-01: Share decoded, premultiplied pixels and their hash across commands
+// and requests. The encoded Arc is the generation identity: replacing an asset
+// cannot reuse stale pixels, even if an older decode finishes after the put.
+pub(crate) struct DecodedAsset {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) pixel_sha256: String,
+}
+
+struct DecodedLru {
+    entries: LruCache<String, (Arc<Vec<u8>>, Arc<DecodedAsset>)>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl DecodedLru {
+    fn new(budget: usize) -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some((encoded, decoded)) = self.entries.pop(key) {
+            self.bytes = self
+                .bytes
+                .saturating_sub(encoded.len() + decoded.pixels.len());
+        }
+    }
+
+    fn insert(&mut self, key: &str, encoded: Arc<Vec<u8>>, decoded: Arc<DecodedAsset>) {
+        self.remove(key);
+        let bytes = encoded.len().saturating_add(decoded.pixels.len());
+        if bytes > self.budget {
+            return;
+        }
+        while self.bytes.saturating_add(bytes) > self.budget {
+            let Some((_, (old_encoded, old_decoded))) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes = self
+                .bytes
+                .saturating_sub(old_encoded.len() + old_decoded.pixels.len());
+        }
+        self.bytes += bytes;
+        self.entries.put(key.to_owned(), (encoded, decoded));
+    }
 }
 
 impl AssetStore {
@@ -176,12 +232,22 @@ impl AssetStore {
     /// `max_mb` is the byte budget of the LRU cache in MiB, shared by all
     /// cached assets. A budget larger than `usize` bytes is treated as
     /// unlimited.
+    /// An independent decoded-pixel budget defaults to the same size; override
+    /// it with `SEKAI_PROFILE_DECODED_CACHE_MB`, or set that variable to 0 to
+    /// disable decoded retention. In-flight render references may outlive eviction.
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ByteLru::new(max_mb.saturating_mul(1024 * 1024))),
             pinned_static_keys: Mutex::new(BTreeSet::new()),
             pinned_bytes: Mutex::new(HashMap::new()),
             shape_sdf_identities: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(DecodedLru::new(
+                std::env::var("SEKAI_PROFILE_DECODED_CACHE_MB")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(max_mb)
+                    .saturating_mul(1024 * 1024),
+            )),
         }
     }
 
@@ -191,7 +257,26 @@ impl AssetStore {
     /// codec and premultiplies each channel as `round(value * alpha / 255)`.
     /// Non-PNG payloads are refused rather than guessed at.
     pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let decoded = self.get_decoded(key)?;
+        Some((decoded.width, decoded.height, decoded.pixels.clone()))
+    }
+
+    pub(crate) fn get_decoded(&self, key: &str) -> Option<Arc<DecodedAsset>> {
         let encoded = self.get(key)?;
+        {
+            let mut cache = self
+                .decoded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some((generation, decoded)) = cache.entries.get(key) {
+                if Arc::ptr_eq(generation, &encoded) {
+                    return Some(Arc::clone(decoded));
+                }
+            }
+            // A replacement may be corrupt or too large to retain. Release the
+            // old generation even when the new decode cannot enter the cache.
+            cache.remove(key);
+        }
         if !crate::codec::png::is_png(&encoded) {
             tracing::warn!(
                 asset_key = key,
@@ -214,7 +299,17 @@ impl AssetStore {
                 *value = crate::codec::premultiply_channel(*value, alpha);
             }
         }
-        Some((decoded.width, decoded.height, pixels))
+        let decoded = Arc::new(DecodedAsset {
+            width: decoded.width,
+            height: decoded.height,
+            pixel_sha256: hex::encode(Sha256::digest(&pixels)),
+            pixels,
+        });
+        self.decoded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, encoded, Arc::clone(&decoded));
+        Some(decoded)
     }
 
     /// Sets a disk cache directory, created if missing. Every later
@@ -459,6 +554,62 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn decoded_cache_reuses_pixels_and_rejects_replaced_generations() {
+        let store = AssetStore::new(4);
+        // Do not depend on the process-wide environment in cache tests.
+        *store.decoded.lock().expect("cache") = DecodedLru::new(1024 * 1024);
+        let first = crate::codec::png::encode_rgba(1, 1, &[200, 100, 50, 128]).expect("PNG");
+        store.put("image".into(), first);
+        let decoded = store.get_decoded("image").expect("decoded");
+        assert_eq!(decoded.pixels, [100, 50, 25, 128]);
+        assert!(Arc::ptr_eq(
+            &decoded,
+            &store.get_decoded("image").expect("hit")
+        ));
+
+        let second = crate::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("PNG");
+        store.put("image".into(), second);
+        let replaced = store.get_decoded("image").expect("replacement");
+        assert!(!Arc::ptr_eq(&decoded, &replaced));
+        assert_eq!(replaced.pixels, [1, 2, 3, 255]);
+        assert_ne!(decoded.pixel_sha256, replaced.pixel_sha256);
+        store.put("image".into(), b"broken PNG".to_vec());
+        assert!(
+            store.get_decoded("image").is_none(),
+            "must not serve stale pixels"
+        );
+        assert_eq!(
+            decoded.pixels,
+            [100, 50, 25, 128],
+            "in-flight pixels stay valid"
+        );
+    }
+
+    #[test]
+    fn decoded_cache_obeys_budget_and_can_be_disabled() {
+        let store = AssetStore::new(4);
+        let encoded = crate::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("PNG");
+        let budget = encoded.len() + 4;
+        *store.decoded.lock().expect("cache") = DecodedLru::new(budget);
+        store.put("a".into(), encoded.clone());
+        store.put("b".into(), encoded);
+        let a = store.get_decoded("a").expect("a");
+        store.get_decoded("b").expect("b");
+        assert_eq!(store.decoded.lock().expect("cache").bytes, budget);
+        assert!(!Arc::ptr_eq(
+            &a,
+            &store.get_decoded("a").expect("evicted a")
+        ));
+        *store.decoded.lock().expect("cache") = DecodedLru::new(0);
+        let a = store.get_decoded("a").expect("uncached a");
+        assert!(!Arc::ptr_eq(
+            &a,
+            &store.get_decoded("a").expect("uncached a again")
+        ));
+        assert_eq!(store.decoded.lock().expect("cache").bytes, 0);
+    }
 
     #[test]
     fn shape_source_identity_hashes_the_stored_red_and_alpha_samples() {

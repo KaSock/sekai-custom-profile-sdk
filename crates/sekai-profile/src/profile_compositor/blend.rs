@@ -205,6 +205,26 @@ pub(super) fn composite_isolation(
             }
             let offset = row + x as usize * 4;
             #[cfg(target_arch = "x86_64")]
+            if executor == ImageExecutor::Avx2 {
+                let active = if packet == 16 {
+                    u16::MAX
+                } else {
+                    (1u16 << packet) - 1
+                };
+                // SAFETY: the AVX2 entry checks CPU features; bounds and mask
+                // restrict all memory accesses to the current canvas row.
+                unsafe {
+                    super::avx2::blend_rgba8_packet(
+                        parent.as_mut_ptr().add(offset),
+                        child.as_ptr().add(offset).cast(),
+                        active,
+                        BlendMode::SrcOver,
+                    );
+                }
+                x += packet;
+                continue;
+            }
+            #[cfg(target_arch = "x86_64")]
             if executor == ImageExecutor::Simd {
                 let active = if packet == 16 {
                     u16::MAX

@@ -13,6 +13,9 @@ use super::{
 };
 use crate::sdf::shape::{shade_shape, ShapeSdfTexel};
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
+
 impl SdfTilePlan {
     /// Executes the reference FP32 sampler/shader into premultiplied RGBA8.
     /// `clear` must itself be premultiplied.
@@ -128,6 +131,87 @@ impl SdfTilePlan {
         use_precomputed_shapes: bool,
         first_y: u32,
     ) -> Result<SdfExecutionStats, SdfTileError> {
+        self.execute_packet_rows(
+            atlas,
+            destination,
+            output,
+            accumulation,
+            use_precomputed_shapes,
+            first_y,
+            false,
+        )
+    }
+
+    /// AVX2/FMA equivalent of the scalar FP32 page executor.
+    pub fn execute_avx2_f32(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        clear: [u8; 4],
+        output: &mut [u8],
+    ) -> Result<SdfExecutionStats, SdfTileError> {
+        self.execute_avx2_destination(atlas, SdfDestination::Clear(clear), output)
+    }
+
+    /// Blends eight-fragment packets over an existing RGBA8 page.
+    pub fn execute_avx2_f32_over(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        output: &mut [u8],
+    ) -> Result<SdfExecutionStats, SdfTileError> {
+        self.execute_avx2_destination(atlas, SdfDestination::LoadExisting, output)
+    }
+
+    fn execute_avx2_destination(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        destination: SdfDestination,
+        output: &mut [u8],
+    ) -> Result<SdfExecutionStats, SdfTileError> {
+        let expected = (self.grid.canvas_width as usize)
+            .checked_mul(self.grid.canvas_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(SdfTileError::SizeOverflow)?;
+        if output.len() != expected {
+            return Err(SdfTileError::OutputLength {
+                expected,
+                actual: output.len(),
+            });
+        }
+        self.execute_avx2_rows(atlas, destination, output, 0)
+    }
+
+    pub(super) fn execute_avx2_rows(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        destination: SdfDestination,
+        output: &mut [u8],
+        first_y: u32,
+    ) -> Result<SdfExecutionStats, SdfTileError> {
+        if !crate::render_config::sdf_avx2_available() {
+            return Err(SdfTileError::Avx2Unavailable);
+        }
+        self.execute_packet_rows(
+            atlas,
+            destination,
+            output,
+            SdfAccumulationMode::F32Tile,
+            false,
+            first_y,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_packet_rows(
+        &self,
+        atlas: &impl SdfAtlasSource,
+        destination: SdfDestination,
+        output: &mut [u8],
+        accumulation: SdfAccumulationMode,
+        use_precomputed_shapes: bool,
+        first_y: u32,
+        use_avx2: bool,
+    ) -> Result<SdfExecutionStats, SdfTileError> {
         if let SdfDestination::Clear(clear) = destination {
             for pixel in output.as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&clear);
@@ -240,7 +324,47 @@ impl SdfTilePlan {
                     }
                 }
                 let py = y as f32 + PIXEL_CENTRE;
-                for local_x in span.x0..span.x1 {
+                let mut scalar_begin = span.x0;
+                #[cfg(target_arch = "x86_64")]
+                if use_avx2 {
+                    while span.x1 - scalar_begin >= 8 {
+                        let pixel_index =
+                            usize::from(span.row) * tile_width + usize::from(scalar_begin);
+                        // SAFETY: execute_avx2_rows checks AVX2/FMA. The planner
+                        // bounds every span to one tile row; all eight pixels
+                        // are inside this span and the tile allocation.
+                        unsafe {
+                            avx2::shade_blend_packet(
+                                atlas,
+                                command,
+                                origin_x + u32::from(scalar_begin),
+                                y,
+                                &mut tile[pixel_index..pixel_index + 8],
+                            )?;
+                        }
+                        stats.shaded_fragment_count += 8;
+                        stats.sampled_texel_count += 32;
+                        stats.blended_fragment_count += 8;
+                        stats.simd_packet_count += 1;
+                        // AVX2 uses checked texel fetches rather than the
+                        // AVX-512 physical swizzled-page load path.
+                        stats.gather_fallback_packet_count += 1;
+                        match command.source.kind {
+                            SdfPrimitiveKind::Text => {
+                                stats.text_shaded_fragment_count += 8;
+                                stats.text_blended_fragment_count += 8;
+                            }
+                            SdfPrimitiveKind::Shape => {
+                                stats.shape_shaded_fragment_count += 8;
+                                stats.shape_blended_fragment_count += 8;
+                            }
+                        }
+                        scalar_begin += 8;
+                    }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                let _ = use_avx2;
+                for local_x in scalar_begin..span.x1 {
                     let x = origin_x + u32::from(local_x);
                     let px = x as f32 + PIXEL_CENTRE;
                     let tx = command

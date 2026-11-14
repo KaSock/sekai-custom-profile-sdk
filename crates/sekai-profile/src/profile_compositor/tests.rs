@@ -552,6 +552,113 @@ fn store(objects: Vec<(&str, u32, u32, Vec<u8>)>) -> (tempfile::TempDir, MappedR
 }
 
 #[test]
+fn indexed_authored_commands_and_avx2_preserve_order_masks_clips_and_isolation() {
+    let (_temp, store) = store(vec![
+        (
+            "texture:assets/source",
+            2,
+            2,
+            vec![
+                70, 30, 10, 128, 15, 80, 40, 160, 80, 90, 10, 200, 0, 0, 0, 0,
+            ],
+        ),
+        ("texture:assets/mask", 2, 1, vec![0, 0, 0, 90, 0, 0, 0, 255]),
+    ]);
+    let id = StableId(901);
+    let other = StableId(902);
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 29.5,
+        height: 8.75,
+    };
+    let uv = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+    for mode in [
+        BlendMode::SrcOver,
+        BlendMode::SrcIn,
+        BlendMode::DstIn,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Add,
+    ] {
+        for tint in [[1.0; 4], [0.6, 0.8, 0.4, 0.7]] {
+            let mut image = image_command("image", id, "source", bounds, uv, mode);
+            if let SemanticCommandPayload::Image {
+                alpha_mask,
+                clip,
+                tint: color,
+                ..
+            } = &mut image.payload
+            {
+                *alpha_mask = Some(ResourceKey {
+                    namespace: "assets".into(),
+                    key: "mask".into(),
+                });
+                *clip = Some(sekai_profile_core::ImageClip::RoundedRect { radius: 2.0 });
+                *color = tint;
+            }
+            let mut end = composite_command("end", id, CompositeOperation::EndIsolation);
+            if let SemanticCommandPayload::Composite { opacity, .. } = &mut end.payload {
+                *opacity = 0.73;
+            }
+            let mut scene = scene(
+                test_layer(id, [0.9, 0.15, -0.1, 1.1, 2.25, 0.75]),
+                vec![
+                    composite_command("begin", id, CompositeOperation::BeginIsolation),
+                    // A different authored element is interleaved in scene order.
+                    // Neither the old filter nor the new index should execute it.
+                    image_command(
+                        "unselected",
+                        other,
+                        "missing",
+                        bounds,
+                        uv,
+                        BlendMode::SrcOver,
+                    ),
+                    image.clone(),
+                    image,
+                    end,
+                ],
+            );
+            let mut other_layer = test_layer(other, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            other_layer.authored_index = 1;
+            scene.layers.push(other_layer);
+            let index = ProfileSceneIndex::new(&scene).expect("index");
+            let render = |executor, index| {
+                let mut pixels = [23, 37, 41, 191].repeat(37 * 13);
+                render_authored_profile_indexed(
+                    &scene,
+                    CompositorSources::new(&store),
+                    (AuthoredElementKind::Other, 0),
+                    RgbaSurface::new(&mut pixels, 37, 13).expect("surface"),
+                    executor,
+                    index,
+                )
+                .expect("render");
+                pixels
+            };
+            let expected = render(crate::render_config::Executor::Scalar, None);
+            assert_eq!(
+                render(crate::render_config::Executor::Scalar, Some(&index)),
+                expected
+            );
+            if crate::sdf_avx2_available() {
+                assert_eq!(
+                    render(crate::render_config::Executor::Avx2, Some(&index)),
+                    expected,
+                    "{mode:?} {tint:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn integer_premultiplied_multiply_matches_float_quantization() {
     for left in u8::MIN..=u8::MAX {
         for right in u8::MIN..=u8::MAX {

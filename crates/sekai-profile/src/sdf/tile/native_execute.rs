@@ -36,6 +36,12 @@ impl SdfTilePlan {
         #[cfg(not(feature = "parallel"))]
         {
             match (executor, destination) {
+                (Executor::Avx2, SdfDestination::Clear(clear)) => {
+                    self.execute_avx2_f32(atlas, clear, output)
+                }
+                (Executor::Avx2, SdfDestination::LoadExisting) => {
+                    self.execute_avx2_f32_over(atlas, output)
+                }
                 (Executor::Scalar, SdfDestination::Clear(clear)) => {
                     self.execute_scalar_f32(atlas, clear, output)
                 }
@@ -79,6 +85,9 @@ impl SdfTilePlan {
                     .map(|(index, band)| {
                         let first_y = index as u32 * u32::from(self.grid.tile_height);
                         match executor {
+                            Executor::Avx2 => {
+                                self.execute_avx2_rows(atlas, destination, band, first_y)
+                            }
                             Executor::Scalar => self.execute_scalar_rows(
                                 atlas,
                                 destination,

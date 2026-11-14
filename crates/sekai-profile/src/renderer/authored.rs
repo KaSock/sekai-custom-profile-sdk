@@ -33,6 +33,7 @@ pub(super) fn resolve_native_profile_scene(
 
 /// Composites one authored element into `surface`, whose origin sits at
 /// `canvas_origin` on the profile canvas.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_authored_image_into_pixels(
     scene: &sekai_profile_core::profile_scene::ResolvedProfileScene,
     sources: CompositorSources<'_>,
@@ -41,6 +42,7 @@ pub(super) fn render_authored_image_into_pixels(
     surface: RgbaSurface<'_>,
     canvas_origin: [f32; 2],
     image_executor: Executor,
+    scene_index: Option<&crate::profile_compositor::ProfileSceneIndex<'_>>,
 ) -> Result<crate::profile_compositor::ProfileCompositorStats, String> {
     let [canvas_origin_x, canvas_origin_y] = canvas_origin;
     let translated_scene;
@@ -59,22 +61,21 @@ pub(super) fn render_authored_image_into_pixels(
     } else {
         scene
     };
-    match image_executor {
-        Executor::Simd => crate::profile_compositor::render_authored_profile_into_simd(
-            scene,
-            sources,
-            authored_kind,
-            authored_index,
-            surface,
-        ),
-        Executor::Scalar => crate::profile_compositor::render_authored_profile_into_scalar(
-            scene,
-            sources,
-            authored_kind,
-            authored_index,
-            surface,
-        ),
-    }
+    // PERF-02: Translated animation scenes own different layer matrices, so
+    // their original index must not be reused. Static pages share one index.
+    let scene_index = if canvas_origin_x != 0.0 || canvas_origin_y != 0.0 {
+        None
+    } else {
+        scene_index
+    };
+    crate::profile_compositor::render_authored_profile_indexed(
+        scene,
+        sources,
+        (authored_kind, authored_index),
+        surface,
+        image_executor,
+        scene_index,
+    )
     .map_err(|error| error.to_string())
 }
 
