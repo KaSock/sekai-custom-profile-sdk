@@ -183,28 +183,51 @@ fn layout_layer(
             let mut rendered_count = 0usize;
             for raw_ch in piece.text.chars() {
                 let (display, char_scale) = seg.transform_char(raw_ch);
-                let glyph_advance_tmp = layer_glyph(layer, glyphs, raw_ch, display).advance(
+                let resolved = layer_glyph(layer, glyphs, raw_ch, display);
+                let glyph_advance_tmp = resolved.advance(
                     measure_size * char_scale,
                     atlas.base_size,
                     &layer.font_family,
                 ) * TEXT_SCALE;
-                measured += (glyph_advance_tmp * seg_scale) / TEXT_SCALE;
+                // FIX-TMP-MSPACE-01: measure the same fixed cells that draw uses.
+                let preferred_advance_tmp = seg.monospace.unwrap_or(glyph_advance_tmp);
+                let caret_advance_tmp = seg.monospace.unwrap_or(glyph_advance_tmp * seg_scale);
+                measured += caret_advance_tmp / TEXT_SCALE;
                 rendered_count += 1;
                 has_visible |= !raw_ch.is_whitespace();
-                max_cpv_width_tmp = tmp_layout::extend_preferred_width_for_char(
-                    max_cpv_width_tmp,
-                    cpv_xadv_tmp,
-                    glyph_advance_tmp,
-                    raw_ch,
-                );
+                max_cpv_width_tmp = if let Some(cell) = seg.monospace {
+                    let ink_center_tmp =
+                        resolved
+                            .atlas_glyph()
+                            .map_or(glyph_advance_tmp / 2.0, |glyph| {
+                                (glyph.plane_bearing_x + glyph.plane_width / 2.0)
+                                    * (measure_size * char_scale / atlas.base_size)
+                                    * TEXT_SCALE
+                            });
+                    tmp_layout::monospace_preferred_width(
+                        max_cpv_width_tmp,
+                        cpv_xadv_tmp,
+                        glyph_advance_tmp,
+                        ink_center_tmp,
+                        cell,
+                        raw_ch,
+                    )
+                } else {
+                    tmp_layout::extend_preferred_width_for_char(
+                        max_cpv_width_tmp,
+                        cpv_xadv_tmp,
+                        glyph_advance_tmp,
+                        raw_ch,
+                    )
+                };
                 // TMP's preferred width ignores `<scale>`, so the line-indent
                 // program reads the unscaled advances.
                 current_line_advances_tmp
-                    .push(glyph_advance_tmp + cspace_raw_tmp + pending_advance_tmp);
+                    .push(preferred_advance_tmp + cspace_raw_tmp + pending_advance_tmp);
                 pending_advance_tmp = 0.0;
                 vbounds_max_top = vbounds_max_top.max(voffset_tmp + glyph_asc_tmp);
                 vbounds_min_bottom = vbounds_min_bottom.min(voffset_tmp - glyph_des_tmp);
-                cpv_xadv_tmp += glyph_advance_tmp + cspace_raw_tmp;
+                cpv_xadv_tmp += preferred_advance_tmp + cspace_raw_tmp;
             }
             let cspace = cspace_raw_tmp / TEXT_SCALE;
             w_scaled += measured + cspace * rendered_count as f32;
@@ -975,6 +998,68 @@ mod tests {
     /// Latin capitals 60 units wide at the 75-unit atlas size: 19.2 at size 24.
     const LETTERS: &[(char, f32)] = &[('A', 60.0), ('B', 60.0), ('C', 60.0), ('\u{25A1}', 75.0)];
     const LETTER_ADVANCE: f64 = 19.2;
+
+    #[test]
+    fn monospace_aligns_fixed_cells_and_measures_the_shifted_ink_origin() {
+        for scale in [0.2, 1.0, 4.0] {
+            let text = format!("<mspace=10><scale={scale}>AB");
+            for align in [1, 2, 4] {
+                let output = layout(&text, 24.0, align, 0.0, LETTERS);
+                let metrics = &instances(&output)[0]["layoutMetrics"];
+                assert_close(
+                    metrics["lineWidths"][0].as_f64().unwrap(),
+                    10.0,
+                    "fixed-cell line width",
+                );
+                assert_close(
+                    metrics["rectWidths"][0].as_f64().unwrap(),
+                    21.26,
+                    "preferred width with centering shift",
+                );
+                assert_close(
+                    metrics["boxW"].as_f64().unwrap(),
+                    53.26,
+                    "preferred width plus prefab padding",
+                );
+                let centers: Vec<_> = instances(&output)
+                    .iter()
+                    .map(|glyph| op(glyph, 1) + op(glyph, 4))
+                    .collect();
+                assert_close(centers[1] - centers[0], 5.0, "fixed-cell ink centers");
+                if align == 2 {
+                    assert_close(centers[0], -2.5, "center-aligned first cell");
+                    assert_close(centers[1], 2.5, "center-aligned second cell");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn monospace_line_indent_feedback_uses_cells_instead_of_glyph_advances() {
+        let output = layout(
+            "<line-indent=50%><mspace=10><scale=4>AB",
+            24.0,
+            1,
+            0.0,
+            LETTERS,
+        );
+        assert_eq!(
+            output["dynamicPrograms"][0]["lineAdvancesTmp"][0],
+            json!([10.0, 10.0])
+        );
+    }
+
+    #[test]
+    fn closing_monospace_restores_proportional_advance() {
+        let output = layout("<mspace=10>AB</mspace>CA", 24.0, 2, 0.0, LETTERS);
+        let center = |index| op(&instances(&output)[index], 1) + op(&instances(&output)[index], 4);
+        assert_close(center(1) - center(0), 5.0, "mono centers");
+        assert_close(
+            op(&instances(&output)[3], 1) - op(&instances(&output)[2], 1),
+            LETTER_ADVANCE,
+            "restored proportional advance",
+        );
+    }
 
     fn instances(output: &Value) -> &Vec<Value> {
         output["instances"].as_array().unwrap()

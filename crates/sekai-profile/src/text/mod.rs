@@ -127,6 +127,31 @@ fn layout_advance(
         .unwrap_or(0.0)
 }
 
+fn layout_ink_center_x(
+    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    family: Option<&str>,
+    display: char,
+    size: f32,
+    advance: f32,
+) -> f32 {
+    let Some(ch) = resolve_draw_char(atlases, family, display) else {
+        return advance / 2.0;
+    };
+    atlas_layout_glyph_metrics(atlases, family, ch)
+        .map(|metrics| (metrics.bearing_x + metrics.width / 2.0) * (size / metrics.point_size))
+        .or_else(|| {
+            if atlases.is_some() {
+                None
+            } else {
+                lookup_or_generate(family, ch).map(|glyph| {
+                    (glyph.plane_bearing_x() + glyph.plane_width() / 2.0)
+                        * (size / sdf_outline::sampling_point_size())
+                })
+            }
+        })
+        .unwrap_or(advance / 2.0)
+}
+
 /// Vertex alpha: the markup alpha caps the element alpha.
 fn effective_vertex_alpha_u8(markup_alpha: u8, base_alpha_u8: u8) -> u8 {
     markup_alpha.min(base_alpha_u8)
@@ -309,7 +334,9 @@ fn measure_text_units_tmp(
                 measure_size * char_scale,
             );
             units.push(sekai_profile_core::MeasuredTextUnit {
-                advance: advance * seg_scale * TEXT_SCALE + seg.character_spacing + pending_advance,
+                advance: seg.monospace.unwrap_or(advance * seg_scale * TEXT_SCALE)
+                    + seg.character_spacing
+                    + pending_advance,
                 hard_break: false,
             });
             pending_advance = 0.0;
@@ -984,8 +1011,8 @@ fn layout_text_ops(
         let mut cpv_xadv_tmp = 0.0f32;
         let mut max_cpv_width_tmp = 0.0f32;
         let mut has_chars = false;
-        // Caret chain: <scale> changes the advance, independently of the
-        // preferred-width chain.
+        // Caret chain: <scale> changes proportional advances; <mspace> uses
+        // the fixed cell in both chains, independently of preferred width.
         let mut caret_xadv_tmp = 0.0f32;
         let mut line_text = String::new();
 
@@ -1045,20 +1072,39 @@ fn layout_text_ops(
                     display,
                     measure_size * char_scale,
                 ) * TEXT_SCALE;
-                measured += glyph_hadv_tmp_layout * seg_scale / TEXT_SCALE;
-                max_cpv_width_tmp = tmp_layout::extend_preferred_width_for_char(
-                    max_cpv_width_tmp,
-                    cpv_xadv_tmp,
-                    glyph_hadv_tmp_layout,
-                    ch,
-                );
-                // Caret chain: the advance is multiplied by the scale.
-                let glyph_hadv_tmp_caret = glyph_hadv_tmp_layout * seg_scale;
+                let preferred_advance_tmp = seg.monospace.unwrap_or(glyph_hadv_tmp_layout);
+                let glyph_hadv_tmp_caret =
+                    seg.monospace.unwrap_or(glyph_hadv_tmp_layout * seg_scale);
+                measured += glyph_hadv_tmp_caret / TEXT_SCALE;
+                max_cpv_width_tmp = if let Some(cell) = seg.monospace {
+                    let ink_center_tmp = layout_ink_center_x(
+                        capture_atlases,
+                        resolved_name_ref,
+                        display,
+                        measure_size * char_scale,
+                        glyph_hadv_tmp_layout / TEXT_SCALE,
+                    ) * TEXT_SCALE;
+                    tmp_layout::monospace_preferred_width(
+                        max_cpv_width_tmp,
+                        cpv_xadv_tmp,
+                        glyph_hadv_tmp_layout,
+                        ink_center_tmp,
+                        cell,
+                        ch,
+                    )
+                } else {
+                    tmp_layout::extend_preferred_width_for_char(
+                        max_cpv_width_tmp,
+                        cpv_xadv_tmp,
+                        glyph_hadv_tmp_layout,
+                        ch,
+                    )
+                };
                 vbounds_max_top_tmp = vbounds_max_top_tmp.max(voffset_tmp + glyph_asc_tmp);
                 vbounds_min_bottom_tmp = vbounds_min_bottom_tmp.min(voffset_tmp - glyph_des_tmp);
                 if debug_probe {
                     let before = cpv_xadv_tmp;
-                    let after = cpv_xadv_tmp + glyph_hadv_tmp_layout + cspace_raw_tmp;
+                    let after = cpv_xadv_tmp + preferred_advance_tmp + cspace_raw_tmp;
                     tmp_char_probes.push(TmpDebugCharProbe {
                         line_index: line_idx,
                         ch: display.to_string(),
@@ -1070,10 +1116,10 @@ fn layout_text_ops(
                         glyph_advance_tmp_for_layout: glyph_hadv_tmp_layout,
                         glyph_advance_tmp_for_caret: glyph_hadv_tmp_caret,
                         x_advance_after_tmp: after,
-                        preferred_width_candidate_tmp: before.abs() + glyph_hadv_tmp_layout,
+                        preferred_width_candidate_tmp: max_cpv_width_tmp,
                     });
                 }
-                cpv_xadv_tmp += glyph_hadv_tmp_layout + cspace_raw_tmp;
+                cpv_xadv_tmp += preferred_advance_tmp + cspace_raw_tmp;
                 caret_xadv_tmp += glyph_hadv_tmp_caret + cspace_raw_tmp;
                 n_chars += 1;
             }
@@ -1323,7 +1369,7 @@ fn layout_text_ops(
             let [sr, sg, sb] = seg.color.unwrap_or([def_color.r, def_color.g, def_color.b]);
             let sa_u8 = effective_vertex_alpha_u8(seg.alpha, def_color.a);
             let italic_slope = seg.italic.map(|angle| angle as f32 * 0.01);
-            let mono_cell = seg.monospace.map_or(0.0, |cell| cell / TEXT_SCALE);
+            let mono_cell = seg.monospace.map(|cell| cell / TEXT_SCALE);
 
             for ch in piece.text.chars() {
                 let (display, char_scale) = seg.transform_char(ch);
@@ -1414,9 +1460,9 @@ fn layout_text_ops(
                     }
                     None => 0.0,
                 };
-                let draw_x = if mono_cell > 0.0 {
+                let draw_x = if let Some(cell) = mono_cell {
                     // pivot_x is the FreeType glyph-ink centre.
-                    cursor_x + mono_cell / 2.0 - pivot_x
+                    cursor_x + cell / 2.0 - pivot_x
                 } else {
                     cursor_x
                 };
@@ -1441,8 +1487,8 @@ fn layout_text_ops(
                     ),
                 });
 
-                if mono_cell > 0.0 {
-                    cursor_x += mono_cell + cspace_px;
+                if let Some(cell) = mono_cell {
+                    cursor_x += cell + cspace_px;
                 } else {
                     // Cursor advance comes from FreeType, the same engine TMP uses.
                     let adv = if glyph::advances_caret(ch) {

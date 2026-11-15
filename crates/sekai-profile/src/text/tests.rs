@@ -99,6 +99,38 @@ fn layout_ops(
 }
 
 #[test]
+fn monospace_centers_stay_in_fixed_cells_under_horizontal_scale() {
+    let Some(_) = layout_test_md() else {
+        return;
+    };
+    for scale in [0.2, 1.0, 4.0] {
+        let text = format!("<mspace=10><scale={scale}>AB");
+        let ops = layout_ops(&text, 24.0, 0.0, 2).expect("test font");
+        assert_close(ops[0].x + ops[0].pivot_x, -2.5, "first cell centre");
+        assert_close(ops[1].x + ops[1].pivot_x, 2.5, "second cell centre");
+    }
+}
+
+#[test]
+fn monospace_feedback_and_wrapping_share_the_fixed_cell_advance() {
+    let Some(md) = layout_test_md() else {
+        return;
+    };
+    for scale in [0.2, 4.0] {
+        let text = format!("<mspace=10><scale={scale}>AB");
+        let element = layout_test_element(&text, 24.0, 0.0, 1);
+        let segments = tmp_text::parse_segments(&text, 24.0);
+        for scaled in [false, true] {
+            let units = super::measure_text_units_tmp(&element, &md, &segments, None, scaled);
+            assert_eq!(
+                units.iter().map(|unit| unit.advance).collect::<Vec<_>>(),
+                vec![10.0, 10.0]
+            );
+        }
+    }
+}
+
+#[test]
 fn page_layout_cache_reuses_layout_but_emits_the_current_transform() {
     let Some(md) = layout_test_md() else {
         return;

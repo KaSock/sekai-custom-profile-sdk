@@ -32,6 +32,20 @@ pub fn extend_preferred_width_for_char(
         extend_preferred_width(current, caret_before, glyph_advance)
     }
 }
+pub fn monospace_preferred_width(
+    current: f32,
+    caret_before: f32,
+    glyph_advance: f32,
+    ink_center: f32,
+    cell: f32,
+    ch: char,
+) -> f32 {
+    if ch.is_whitespace() {
+        current
+    } else {
+        (caret_before + cell / 2.0 - ink_center).abs() + glyph_advance
+    }
+}
 
 /// Start of a line with a percentage `<indent>`, for a line `line_width`
 /// wide and the TMP alignment code `align` (1 left, 2 centre, 4 right).
@@ -146,6 +160,22 @@ pub fn uniform_line_indent_percent(segments: &[TextSegment]) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monospace_preferred_width_uses_the_shifted_last_visible_candidate() {
+        let first = monospace_preferred_width(0.0, 0.0, 38.4, 10.88, 10.0, 'A');
+        let second = monospace_preferred_width(first, 10.0, 38.4, 10.88, 10.0, 'B');
+        assert!((first - 44.28).abs() < 1e-4);
+        assert!((second - 42.52).abs() < 1e-4);
+        assert_eq!(
+            monospace_preferred_width(second, 20.0, 12.0, 0.0, 10.0, ' '),
+            second
+        );
+        assert_eq!(
+            monospace_preferred_width(0.0, -10.0, 20.0, 8.0, -4.0, 'A'),
+            40.0
+        );
+    }
 
     #[test]
     fn preferred_width_resets_with_the_caret_and_keeps_negative_extents() {
