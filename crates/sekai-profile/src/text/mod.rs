@@ -437,6 +437,19 @@ struct DrawCharOp {
 }
 
 #[derive(Clone, Copy)]
+struct DrawUnderlineOp {
+    start_x: f32,
+    end_x: f32,
+    baseline_y: f32,
+    font_size: f32,
+    offset: f32,
+    thickness: f32,
+    face: [f32; 3],
+    alpha_u8: u8,
+    bold: bool,
+}
+
+#[derive(Clone, Copy)]
 struct AtlasLayoutGlyphMetrics {
     point_size: f32,
     spread: f32,
@@ -472,6 +485,7 @@ pub(crate) struct ResolvedTextSdfGlyph {
     pub font_size: f32,
     pub local_to_device: crate::sdf::tile::Affine2,
     pub material: crate::sdf::tile::SdfMaterial,
+    pub quad_override: Option<[crate::sdf::tile::Point2; 4]>,
 }
 
 impl ResolvedTextSdfGlyph {
@@ -517,7 +531,7 @@ impl ResolvedTextSdfGlyph {
         atlas_point_size: f32,
         atlas_spread: f32,
     ) -> Result<crate::sdf::tile::SdfDrawCommand, TextSdfCommandError> {
-        crate::sdf::tile::SdfDrawCommand::from_atlas_glyph(
+        let mut command = crate::sdf::tile::SdfDrawCommand::from_atlas_glyph(
             crate::sdf::tile::SdfPrimitiveKind::Text,
             crate::sdf::tile::SdfGlyphAtlas {
                 atlas_set,
@@ -532,7 +546,11 @@ impl ResolvedTextSdfGlyph {
             },
             self.material,
         )
-        .map_err(TextSdfCommandError::Placement)
+        .map_err(TextSdfCommandError::Placement)?;
+        if let Some(quad) = self.quad_override {
+            command.quad = quad;
+        }
+        Ok(command)
     }
 }
 
@@ -684,7 +702,62 @@ fn resolve_text_sdf_glyph_from_affine(
             face_color,
             op.sdf_params.as_ref(),
         ),
+        quad_override: None,
     })
+}
+
+fn resolve_text_sdf_underline_from_base_affine(
+    base: [f32; 6],
+    op: &DrawUnderlineOp,
+    font_family: Option<&str>,
+) -> ResolvedTextSdfGlyph {
+    // Layout coordinates are Y-down; font underline position is Y-up.
+    let center_y = op.baseline_y - op.offset;
+    let half_thickness = op.thickness * 0.5;
+    let local = [
+        (op.start_x, center_y - half_thickness),
+        (op.end_x, center_y - half_thickness),
+        (op.end_x, center_y + half_thickness),
+        (op.start_x, center_y + half_thickness),
+    ];
+    let quad_override = Some(local.map(|(x, y)| {
+        crate::sdf::tile::Point2::new(
+            base[0] * x + base[2] * y + base[4],
+            base[1] * x + base[3] * y + base[5],
+        )
+    }));
+    ResolvedTextSdfGlyph {
+        text: "_".into(),
+        font_family: font_family.map(str::to_owned),
+        baseline_origin: crate::sdf::tile::Point2::new(0.0, 0.0),
+        font_size: op.font_size,
+        local_to_device: crate::sdf::tile::Affine2::IDENTITY,
+        material: crate::sdf::material::resolve_tile_material_direct(
+            crate::sdf::material::runtime_like_mesh_carrier(op.font_size, op.bold, op.alpha_u8),
+            [op.face[0], op.face[1], op.face[2], 1.0],
+            None,
+        ),
+        quad_override,
+    }
+}
+
+fn font_underline_metrics(font_family: Option<&str>, font_size: f32) -> (f32, f32) {
+    let metrics = font_family
+        .and_then(sdf_outline::load_font_bytes_for_family)
+        .and_then(|face| {
+            let face = ttf_parser::Face::parse(face.as_slice(), 0).ok()?;
+            let units_per_em = f32::from(face.units_per_em());
+            let metrics = face.underline_metrics()?;
+            let scale = font_size * PROFILE_FACE.scale / units_per_em;
+            Some((
+                f32::from(metrics.position) * scale,
+                f32::from(metrics.thickness).abs() * scale,
+            ))
+        });
+    metrics.unwrap_or((
+        -font_size * PROFILE_FACE.scale * 0.1,
+        font_size * PROFILE_FACE.scale * 0.05,
+    ))
 }
 
 /// A completed TMP-compatible layout: the glyph operations and the timings of
@@ -693,6 +766,7 @@ fn resolve_text_sdf_glyph_from_affine(
 struct TextLayoutRun {
     font_family: Option<String>,
     draw_ops: Vec<DrawCharOp>,
+    underline_ops: Vec<DrawUnderlineOp>,
     timings: TextSdfCaptureTimings,
 }
 
@@ -771,6 +845,13 @@ pub(crate) fn capture_text_sdf_from_affine(
             run.font_family.as_deref(),
         ));
     }
+    for op in &run.underline_ops {
+        observer(Ok(resolve_text_sdf_underline_from_base_affine(
+            base_affine,
+            op,
+            run.font_family.as_deref(),
+        )));
+    }
     timings.emit_ns = capture_elapsed_ns(emit_started);
     timings
 }
@@ -806,6 +887,13 @@ pub(crate) fn capture_text_sdf_with_placement(
             op,
             run.font_family.as_deref(),
         ));
+    }
+    for op in &run.underline_ops {
+        observer(Ok(resolve_text_sdf_underline_from_base_affine(
+            base_affine,
+            op,
+            run.font_family.as_deref(),
+        )));
     }
     run.timings.emit_ns = capture_elapsed_ns(emit_started);
     run.timings
@@ -849,8 +937,7 @@ fn resolve_outline_params(
         })
 }
 
-/// Reject decoration spans that cannot be represented by SDF glyph commands.
-/// The parsed spans distinguish active markup from literal text and empty tags.
+/// Reject decoration spans that do not have a native SDF mesh implementation.
 fn validate_sdf_text_segments(segments: &[TextSegment]) -> Result<(), TextSdfCaptureError> {
     for segment in segments {
         if !segment.text.chars().any(|ch| ch != '\n') {
@@ -858,8 +945,6 @@ fn validate_sdf_text_segments(segments: &[TextSegment]) -> Result<(), TextSdfCap
         }
         let feature = if segment.mark.is_some() {
             Some("text mark")
-        } else if segment.underline {
-            Some("text underline")
         } else if segment.strikethrough {
             Some("text strikethrough")
         } else {
@@ -944,6 +1029,7 @@ fn layout_text_ops(
         return Ok(TextLayoutRun {
             font_family: resolved_name,
             draw_ops: Vec::new(),
+            underline_ops: Vec::new(),
             timings: capture_timings,
         });
     }
@@ -1319,6 +1405,7 @@ fn layout_text_ops(
     capture_timings.measure_ns = capture_elapsed_ns(measure_started);
     let command_build_started = capture_timing_enabled.then(std::time::Instant::now);
     let mut draw_ops = Vec::new();
+    let mut underline_ops = Vec::new();
     let mut line_op_ranges = Vec::with_capacity(lines.len());
     let default_align = segments.first().and_then(|segment| segment.align);
 
@@ -1370,6 +1457,7 @@ fn layout_text_ops(
             let sa_u8 = effective_vertex_alpha_u8(seg.alpha, def_color.a);
             let italic_slope = seg.italic.map(|angle| angle as f32 * 0.01);
             let mono_cell = seg.monospace.map(|cell| cell / TEXT_SCALE);
+            let underline_start_x = cursor_x;
 
             for ch in piece.text.chars() {
                 let (display, char_scale) = seg.transform_char(ch);
@@ -1499,6 +1587,20 @@ fn layout_text_ops(
                     cursor_x += adv * seg_scale + cspace_px;
                 }
             }
+            if seg.underline && cursor_x > underline_start_x {
+                let (offset, thickness) = font_underline_metrics(resolved_name_ref, render_size);
+                underline_ops.push(DrawUnderlineOp {
+                    start_x: underline_start_x,
+                    end_x: cursor_x,
+                    baseline_y: ly + baseline_shift,
+                    font_size: render_size,
+                    offset,
+                    thickness: thickness.max(render_size * 0.01),
+                    face: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0],
+                    alpha_u8: sa_u8,
+                    bold: seg.bold,
+                });
+            }
         }
         line_op_ranges.push(ops_start..draw_ops.len());
     }
@@ -1514,6 +1616,11 @@ fn layout_text_ops(
         for op in &mut draw_ops {
             op.x += dx;
             op.y += dy;
+        }
+        for op in &mut underline_ops {
+            op.start_x += dx;
+            op.end_x += dx;
+            op.baseline_y += dy;
         }
     }
     capture_timings.command_build_ns = capture_elapsed_ns(command_build_started);
@@ -1590,6 +1697,7 @@ fn layout_text_ops(
     Ok(TextLayoutRun {
         font_family: resolved_name,
         draw_ops,
+        underline_ops,
         timings: capture_timings,
     })
 }

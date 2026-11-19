@@ -288,7 +288,7 @@ fn text_capture_error(
 mod capture_error_tests {
     #[test]
     fn unsupported_text_capture_features_keep_the_public_feature_error() {
-        for feature in ["text underline", "text strikethrough", "text mark"] {
+        for feature in ["text strikethrough", "text mark"] {
             let error = super::text_capture_error(
                 "profile-text",
                 crate::text::TextSdfCaptureError::UnsupportedFeature { feature },

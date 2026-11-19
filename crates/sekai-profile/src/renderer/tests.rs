@@ -232,6 +232,7 @@ fn prepared_realtime_edt_pages_follow_the_current_atlas_registry() {
             font_size: 128.0,
             local_to_device: Affine2::IDENTITY,
             material: SdfMaterial::default(),
+            quad_override: None,
         },
     )];
     let grid = TileGrid {
@@ -309,6 +310,7 @@ fn non_positive_resolved_text_size_is_an_invisible_sdf_operation() {
             font_size,
             local_to_device: crate::sdf::tile::Affine2::IDENTITY,
             material: crate::sdf::tile::SdfMaterial::default(),
+            quad_override: None,
         }
     }
 

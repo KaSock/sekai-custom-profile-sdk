@@ -598,6 +598,36 @@ fn rejects_non_affine_and_degenerate_commands() {
 }
 
 #[test]
+fn large_affine_quads_allow_only_f32_scale_rounding_error() {
+    let atlas = solid_atlas(255);
+    let rounded_affine = command(
+        [1.0; 4],
+        [
+            Point2::new(1_000_000.0, -1_000_000.0),
+            Point2::new(1_100_000.0, -900_000.0),
+            Point2::new(1_000_000.25, -700_000.0),
+            Point2::new(900_000.0, -800_000.0),
+        ],
+    );
+    assert!(SdfTilePlan::build(TileGrid::new(4, 4), &[rounded_affine], &atlas).is_ok());
+
+    let perspective = command(
+        [1.0; 4],
+        [
+            Point2::new(1_000_000.0, -1_000_000.0),
+            Point2::new(1_100_000.0, -900_000.0),
+            Point2::new(1_000_003.0, -700_000.0),
+            Point2::new(900_000.0, -800_000.0),
+        ],
+    );
+    assert_eq!(
+        SdfTilePlan::build(TileGrid::new(4, 4), &[perspective], &atlas)
+            .expect_err("materially non-affine quad must fail"),
+        SdfTileError::NonAffineQuad { command: 0 }
+    );
+}
+
+#[test]
 fn reports_shape_commands_separately() {
     let atlas = solid_atlas(255);
     let mut shape = command([1.0; 4], rectangle(0.0, 0.0, 2.0, 2.0));

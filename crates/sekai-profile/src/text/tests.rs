@@ -457,10 +457,8 @@ fn sdf_capture_rejects_decoration_spans_without_emitting_partial_glyphs() {
 
     let md = MasterData::new(Arc::new(NoFonts));
     for (text, feature) in [
-        ("plain <u>underlined</u>", "text underline"),
         ("plain <s>struck</s>", "text strikethrough"),
         ("plain <mark=#ff0000>marked</mark>", "text mark"),
-        ("<u> </u>", "text underline"),
     ] {
         let element = serde_json::from_value(serde_json::json!({
             "objectData": {
@@ -508,6 +506,7 @@ fn sdf_capture_rejects_decoration_spans_without_emitting_partial_glyphs() {
 fn sdf_capture_accepts_literal_markup_empty_decorations_and_supported_styles() {
     for text in [
         "plain text",
+        "plain <u>underlined</u>",
         "<b>bold</b><i>italic</i><color=#ff0000>red</color>",
         "<noparse><u>literal</u><s>literal</s><mark=#ff0000>literal</mark></noparse>",
         "<u></u><s></s><mark=#ff0000></mark>plain",
@@ -520,6 +519,52 @@ fn sdf_capture_accepts_literal_markup_empty_decorations_and_supported_styles() {
             "text={text}"
         );
     }
+}
+
+#[test]
+fn underline_mesh_quad_uses_baseline_offset_and_device_transform() {
+    let underline = super::DrawUnderlineOp {
+        start_x: 3.0,
+        end_x: 9.0,
+        baseline_y: 10.0,
+        font_size: 24.0,
+        offset: -2.0,
+        thickness: 4.0,
+        face: [1.0, 0.5, 0.25],
+        alpha_u8: 255,
+        bold: false,
+    };
+    let glyph = super::resolve_text_sdf_underline_from_base_affine(
+        [1.0, 0.0, 0.0, 1.0, 20.0, 30.0],
+        &underline,
+        Some("test-family"),
+    );
+    let quad = glyph.quad_override.expect("underline mesh quad");
+    assert_eq!(
+        quad,
+        [
+            crate::sdf::tile::Point2::new(23.0, 40.0),
+            crate::sdf::tile::Point2::new(29.0, 40.0),
+            crate::sdf::tile::Point2::new(29.0, 44.0),
+            crate::sdf::tile::Point2::new(23.0, 44.0),
+        ]
+    );
+    assert_eq!(glyph.text, "_");
+}
+
+#[test]
+fn text_layout_builds_underline_from_font_face_metrics() {
+    let Some(md) = layout_test_md() else {
+        return;
+    };
+    let element = layout_test_element("<u>underlined</u>", 24.0, 0.0, 1);
+    let run =
+        super::layout_text_ops(&element, &md, None, None, None, false).expect("underline layout");
+    assert_eq!(run.underline_ops.len(), 1);
+    let underline = run.underline_ops[0];
+    assert!(underline.start_x < underline.end_x);
+    assert!(underline.offset < 0.0);
+    assert!(underline.thickness > 0.0);
 }
 
 #[test]
@@ -758,6 +803,7 @@ fn captured_sdf_glyph_rejects_non_scalar_text_runs() {
         font_size: 12.0,
         local_to_device: crate::sdf::tile::Affine2::IDENTITY,
         material: crate::sdf::tile::SdfMaterial::default(),
+        quad_override: None,
     };
     assert_eq!(
         captured.single_codepoint(),
@@ -953,6 +999,7 @@ fn captured_sdf_glyph_maps_manifest_metrics_without_relayout() {
         font_size: 20.0,
         local_to_device: crate::sdf::tile::Affine2::IDENTITY,
         material: crate::sdf::tile::SdfMaterial::default(),
+        quad_override: None,
     };
     let glyph = crate::sdf::atlas::SdfAtlasGlyphManifest {
         codepoint: u32::from('字'),

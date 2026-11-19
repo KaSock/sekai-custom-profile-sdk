@@ -539,8 +539,16 @@ fn plan_command(
         top_right.x + bottom_left.x - top_left.x,
         top_right.y + bottom_left.y - top_left.y,
     );
+    // Large TMP glyphs can span many thousands of pixels. Their independently
+    // rounded f32 corners accumulate error proportional to their coordinates.
+    let coordinate_scale = source
+        .quad
+        .iter()
+        .flat_map(|point| [point.x.abs(), point.y.abs()])
+        .fold(1.0f32, f32::max);
+    let parallelogram_error = MAX_PARALLELOGRAM_ERROR + 8.0 * f32::EPSILON * coordinate_scale;
     if (bottom_right.x - expected_bottom_right.x).hypot(bottom_right.y - expected_bottom_right.y)
-        > MAX_PARALLELOGRAM_ERROR
+        > parallelogram_error
     {
         return Err(SdfTileError::NonAffineQuad {
             command: command_index,
