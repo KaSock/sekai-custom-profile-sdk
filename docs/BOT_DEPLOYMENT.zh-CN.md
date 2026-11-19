@@ -93,6 +93,7 @@ AlliumRenderer/
 - `backend`：组合部署填 `browser`，纯原生填 `native`；示例默认 `native`。
 - `browser_sdk_dir`、`browser_page_threads`：组合模式的完整 SDK 目录和常驻页面并发数，页面并发默认 2；
   其余浏览器字段见 [组合渲染部署](BROWSER_BOT.zh-CN.md#3-配置组合模式并启动)。
+- `browser_keepalive_regions`：组合模式下要常驻预热 browser 的区服列表，默认空列表；指定区服会在服务启动时预热，并每 60 秒检查签名与浏览器连接状态。
 - `executable`：构建好的 exe；artifact 根目录部署时改为 `sekai-profile.exe`。
 - `bot_root`：生产 BOT 的根目录，绝对路径；示例路径只是占位符。
 - `bot_url`：BOT FastAPI 实际监听的本机地址和端口，例如 `http://127.0.0.1:8080`。

@@ -2,6 +2,7 @@
   "backend": "native",
   "browser_sdk_dir": "runtime/browser-sdk/dist",
   "browser_page_threads": 2,
+  "browser_keepalive_regions": [],
   "browser_channel": "chromium",
   "browser_headless": true,
   "browser_require_hardware": true,

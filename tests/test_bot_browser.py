@@ -64,6 +64,37 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status['workers']['cn']['started'])
         self.assertEqual((await client.post('/render', json={})).status, 403)
 
+    async def test_keepalive_regions_warm_at_start_and_check_periodically(self):
+        with patch('bot_browser.BrowserWorker', return_value=self.worker), \
+                patch('bot_browser.BROWSER_SIGNATURE_CHECK_SECONDS', 0.01), \
+                patch.object(self.worker, 'ensure_ready', new_callable=AsyncMock) as ensure_ready:
+            client = await self.client(create_app({
+                **self.cfg, 'backend': 'browser', 'browser_keepalive_regions': ['cn']}))
+            await asyncio.sleep(0.035)
+            calls = ensure_ready.await_count
+            await client.close()
+        self.assertGreaterEqual(calls, 2)
+
+    async def test_signature_change_restarts_a_connected_browser(self):
+        self.worker.browser = types.SimpleNamespace(is_connected=lambda: True, close=AsyncMock())
+        self.worker.revision = ('old',)
+        self.worker.signature = Mock(return_value=('new',))
+
+        async def close_old():
+            self.worker.browser = None
+            self.worker.revision = None
+
+        async def start_new(revision):
+            self.worker.browser = types.SimpleNamespace(is_connected=lambda: True, close=AsyncMock())
+            self.worker.revision = revision
+
+        with patch.object(self.worker, 'close', new=AsyncMock(side_effect=close_old)) as close, \
+                patch.object(self.worker, 'start', new=AsyncMock(side_effect=start_new)) as start:
+            await self.worker.ensure_ready()
+        close.assert_awaited_once()
+        start.assert_awaited_once_with(('new',))
+        self.assertEqual(self.worker.revision, ('new',))
+
     async def test_browser_response_preserves_the_bot_media_contract(self):
         item = {'seq': 1, 'kind': 'image', 'content_type': 'image/jpeg',
                 'bytes': 4, 'data': 'anBlZw==', 'backend': 'browser'}
@@ -87,7 +118,8 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         page = types.SimpleNamespace(
             on=Mock(), goto=AsyncMock(), evaluate=AsyncMock(return_value=gpu))
         context = types.SimpleNamespace(new_page=AsyncMock(return_value=page))
-        browser = types.SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+        browser = types.SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock(),
+                                        is_connected=Mock(return_value=True))
         engine = types.SimpleNamespace(
             chromium=types.SimpleNamespace(launch=AsyncMock(return_value=browser)), stop=AsyncMock())
         api = types.ModuleType('playwright.async_api')

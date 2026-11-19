@@ -118,6 +118,7 @@ bot_url、字体目录、原生 exe 路径等继续保留：
   "backend": "browser",
   "browser_sdk_dir": "runtime/browser-sdk/dist",
   "browser_page_threads": 2,
+  "browser_keepalive_regions": ["cn", "jp"],
   "browser_channel": "chromium",
   "browser_headless": true,
   "browser_require_hardware": true
@@ -126,6 +127,10 @@ bot_url、字体目录、原生 exe 路径等继续保留：
 
 `browser_sdk_dir` 相对配置文件所在目录。`browser_page_threads` 支持 1～8，默认 2；
 它与原生的 `SEKAI_PROFILE_PAGE_THREADS`、`SEKAI_PROFILE_RASTER_THREADS` 无关。
+`browser_keepalive_regions` 用区服列表控制常驻 browser，例如 `["cn", "jp"]`；默认 `[]`，
+未列出的区服仍在收到请求时启动。列出的区服会在服务启动时预热，并每 60 秒检查 masterdata、
+字体和图集签名；发生变化或 Chromium 断开时会自动重建。预热失败会记录错误并继续重试，
+不会阻止 HTTP 服务启动。每个常驻区服会持续占用 Chromium 与 GPU/系统内存。
 JPEG 画质继续读取现有 `image_quality`。浏览器 JPEG 的质量刻度不保证与 libjpeg 完全等效。
 
 停止原服务，再按原命令启动：

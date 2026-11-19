@@ -214,7 +214,7 @@ def create_app(cfg):
     elif backend == 'browser':
         # BROWSER-01: Preserve the BOT HTTP contract and native animation export.
         # Playwright is optional and never imported by the native backend.
-        from bot_browser import BrowserWorker
+        from bot_browser import BrowserWorker, BROWSER_SIGNATURE_CHECK_SECONDS
         workers = {region: BrowserWorker(cfg, region, Worker(cfg, region)) for region in regions}
     else:
         raise ValueError('backend must be native or browser')
@@ -224,6 +224,11 @@ def create_app(cfg):
     max_pending = max(1, int(cfg.get('max_pending_requests', 8)))
     pending = 0
     app = web.Application(client_max_size=16 * 1024 * 1024)
+    keepalive_regions = cfg.get('browser_keepalive_regions', []) if backend == 'browser' else []
+    if (not isinstance(keepalive_regions, list)
+            or any(not isinstance(region, str) or region not in workers for region in keepalive_regions)):
+        raise ValueError('browser_keepalive_regions must be a list of configured regions')
+    keepalive_task = None
 
     async def health(request):
         return web.json_response({
@@ -277,11 +282,38 @@ def create_app(cfg):
         finally:
             pending -= 1
 
+    async def refresh_keepalive():
+        for region in keepalive_regions:
+            worker = workers[region]
+            async with worker.lock:
+                try:
+                    await worker.ensure_ready()
+                except Exception:
+                    # A failed warmup must not prevent the HTTP service from
+                    # starting; retry on the next signature-check interval.
+                    await worker.close()
+                    LOG.exception('[%s] browser keepalive failed; will retry', region)
+
+    async def keepalive_loop():
+        while True:
+            await asyncio.sleep(BROWSER_SIGNATURE_CHECK_SECONDS)
+            await refresh_keepalive()
+
+    async def startup(_app):
+        nonlocal keepalive_task
+        if keepalive_regions:
+            await refresh_keepalive()
+            keepalive_task = asyncio.create_task(keepalive_loop())
+
     async def cleanup(_app):
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            await asyncio.gather(keepalive_task, return_exceptions=True)
         await asyncio.gather(*(worker.close() for worker in workers.values()))
 
     app.router.add_get('/health', health)
     app.router.add_post('/render', render)
+    app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app
 

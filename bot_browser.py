@@ -14,6 +14,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 LOG = logging.getLogger('allium-browser')
 ROOT = Path(__file__).resolve().parent
 MEDIA_LIMIT = 64 * 1024 * 1024
+BROWSER_SIGNATURE_CHECK_SECONDS = 60
 JP_FALLBACK_TABLES = {
     'customProfileCharacterIconResources', 'customProfileMaterialResources',
     'customProfileUserInterfaceIconResources',
@@ -89,13 +90,28 @@ class BrowserWorker:
 
     def status(self):
         return {
-            'started': self.browser is not None,
+            'started': self.browser is not None and self.browser.is_connected(),
             'page_threads': self.page_count,
             'gpu': [slot['gpu'] for slot in self.pages],
         }
 
     def signature(self):
         return self.native.signature(), self.native.atlas_signature()
+
+    async def ensure_ready(self):
+        revision = await asyncio.to_thread(self.signature)
+        connected = self.browser is not None and self.browser.is_connected()
+        if self.browser is not None and (not connected or self.revision != revision):
+            reason = 'disconnected' if not connected else 'signature changed'
+            LOG.info('[%s] browser %s; restarting browser', self.region, reason)
+            await self.close()
+        if self.browser is not None:
+            return 0
+        started = time.monotonic()
+        await self.start(revision)
+        startup_ms = round((time.monotonic() - started) * 1000)
+        LOG.info('[%s] browser startup/check time=%sms', self.region, startup_ms)
+        return startup_ms
 
     async def start(self, revision):
         if self.browser is not None:
@@ -256,14 +272,7 @@ class BrowserWorker:
             raise
 
     async def _render(self, profile):
-        revision = await asyncio.to_thread(self.signature)
-        if self.browser is not None and self.revision != revision:
-            await self.close()
-        started = time.monotonic()
-        await self.start(revision)
-        startup_ms = round((time.monotonic() - started) * 1000)
-        if startup_ms:
-            LOG.info('[%s] browser startup/check time=%sms', self.region, startup_ms)
+        startup_ms = await self.ensure_ready()
         self.request_serial += 1
         serial = self.request_serial
         pages = profile['userCustomProfileCards']
