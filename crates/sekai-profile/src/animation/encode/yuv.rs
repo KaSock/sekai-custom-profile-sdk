@@ -1,7 +1,8 @@
 //! RGBA to limited-range YUV 4:2:0 conversion, per frame and per macroblock, with
 //! AVX-512 kernels.
+//! PERF-ANIM-04 adds bit-exact AVX2 kernels for CPUs without AVX-512.
 
-use super::mp4::{H264EncoderConfig, H264YuvConverter};
+use super::mp4::H264EncoderConfig;
 use crate::animation::AnimationError;
 
 #[cfg(test)]
@@ -35,12 +36,9 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
         ));
     }
     yuv.resize(pixels + pixels / 2, 0);
-    config.validate()?;
+    let converter = config.resolved_yuv_converter()?;
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f")
-        && std::arch::is_x86_feature_detected!("avx512bw")
-        && config.yuv_converter != H264YuvConverter::Scalar
-    {
+    if converter == "avx512" {
         // SAFETY: runtime feature detection satisfies the target-feature
         // contract and the output size/dimensions were checked above.
         unsafe { rgba_to_yuv420p_avx512(rgba, width as usize, height as usize, yuv) };
@@ -62,11 +60,12 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
         }
         return Ok(());
     }
-    if config.require_avx512
-        || config.validate_avx512
-        || config.yuv_converter == H264YuvConverter::Avx512
-    {
-        return Err(AnimationError::Avx512Unavailable);
+    #[cfg(target_arch = "x86_64")]
+    if converter == "avx2" {
+        // SAFETY: resolved_yuv_converter checked AVX2; dimensions and buffers
+        // were validated above. Scalar tails never read beyond a row.
+        unsafe { rgba_to_yuv420p_avx2(rgba, width as usize, height as usize, yuv) };
+        return Ok(());
     }
     rgba_to_yuv420p_scalar(rgba, width as usize, height as usize, yuv);
     Ok(())
@@ -91,7 +90,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
             "YUV420 macroblock conversion requires an initialized frame",
         ));
     }
-    config.validate()?;
+    let converter = config.resolved_yuv_converter()?;
     let mb_count = width.div_ceil(16) as usize * height.div_ceil(16) as usize;
     if changed_macroblocks
         .iter()
@@ -102,10 +101,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         ));
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f")
-        && std::arch::is_x86_feature_detected!("avx512bw")
-        && config.yuv_converter != H264YuvConverter::Scalar
-    {
+    if converter == "avx512" {
         let scalar_oracle = config.validate_avx512.then(|| yuv.to_vec());
         // SAFETY: runtime feature detection and the bounds checks above satisfy
         // the target-feature and memory contracts.
@@ -141,11 +137,20 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         }
         return Ok(());
     }
-    if config.require_avx512
-        || config.validate_avx512
-        || config.yuv_converter == H264YuvConverter::Avx512
-    {
-        return Err(AnimationError::Avx512Unavailable);
+    #[cfg(target_arch = "x86_64")]
+    if converter == "avx2" {
+        // SAFETY: AVX2, dimensions, initialized output and macroblock indices
+        // were all checked above.
+        unsafe {
+            rgba_to_yuv420p_macroblocks_avx2(
+                rgba,
+                width as usize,
+                height as usize,
+                changed_macroblocks,
+                yuv,
+            )
+        };
+        return Ok(());
     }
     rgba_to_yuv420p_macroblocks_scalar(
         rgba,
@@ -155,6 +160,180 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         yuv,
     );
     Ok(())
+}
+
+// PERF-ANIM-04: Eight RGBA pixels per row, two rows at a time. Keep 32-bit
+// signed coefficient math and average RGB before chroma conversion, exactly
+// matching scalar rounding (including alpha being ignored).
+//
+// Safety for all AVX2 entry points below: AVX2 must be available, dimensions
+// positive/even, RGBA exactly width*height*4 bytes, YUV exactly width*height*3/2.
+// Macroblock indices must be in range; blocks must stay inside the frame with
+// even origins and extents. Each vector access stays inside its current row.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(in crate::animation) unsafe fn rgba_to_yuv420p_avx2(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    yuv: &mut [u8],
+) {
+    rgba_to_yuv420p_block_avx2(
+        rgba,
+        width,
+        MacroblockRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        yuv,
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(in crate::animation) unsafe fn rgba_to_yuv420p_macroblocks_avx2(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    changed_macroblocks: &[u32],
+    yuv: &mut [u8],
+) {
+    let mb_width = width.div_ceil(16);
+    for &index in changed_macroblocks {
+        let x = index as usize % mb_width * 16;
+        let y = index as usize / mb_width * 16;
+        rgba_to_yuv420p_block_avx2(
+            rgba,
+            width,
+            MacroblockRect {
+                x,
+                y,
+                width: (width - x).min(16),
+                height: (height - y).min(16),
+            },
+            yuv,
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rgba_to_yuv420p_block_avx2(
+    rgba: &[u8],
+    width: usize,
+    block: MacroblockRect,
+    yuv: &mut [u8],
+) {
+    use std::arch::x86_64::*;
+    let pixels = yuv.len() * 2 / 3;
+    let y_plane = yuv.as_mut_ptr();
+    let u_plane = y_plane.add(pixels);
+    let v_plane = u_plane.add(pixels / 4);
+    let vector_end = block.x + block.width / 8 * 8;
+    for y in (block.y..block.y + block.height).step_by(2) {
+        for x in (block.x..vector_end).step_by(8) {
+            let top = _mm256_loadu_si256(rgba.as_ptr().add((y * width + x) * 4).cast());
+            let bottom = _mm256_loadu_si256(rgba.as_ptr().add(((y + 1) * width + x) * 4).cast());
+            let (tr, tg, tb) = avx2_rgb_channels(top);
+            let (br, bg, bb) = avx2_rgb_channels(bottom);
+            _mm_storel_epi64(
+                y_plane.add(y * width + x).cast(),
+                avx2_limited_rgb(tr, tg, tb, 66, 129, 25, 16),
+            );
+            _mm_storel_epi64(
+                y_plane.add((y + 1) * width + x).cast(),
+                avx2_limited_rgb(br, bg, bb, 66, 129, 25, 16),
+            );
+            let r = avx2_pair_average(tr, br);
+            let g = avx2_pair_average(tg, bg);
+            let b = avx2_pair_average(tb, bb);
+            let chroma = y / 2 * (width / 2) + x / 2;
+            std::ptr::write_unaligned(
+                u_plane.add(chroma).cast::<i32>(),
+                _mm_cvtsi128_si32(avx2_limited_rgb(r, g, b, -38, -74, 112, 128)),
+            );
+            std::ptr::write_unaligned(
+                v_plane.add(chroma).cast::<i32>(),
+                _mm_cvtsi128_si32(avx2_limited_rgb(r, g, b, 112, -94, -18, 128)),
+            );
+        }
+        if vector_end < block.x + block.width {
+            rgba_to_yuv420p_block_scalar(
+                rgba,
+                width,
+                MacroblockRect {
+                    x: vector_end,
+                    y,
+                    width: block.x + block.width - vector_end,
+                    height: 2,
+                },
+                yuv,
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_rgb_channels(
+    value: std::arch::x86_64::__m256i,
+) -> (
+    std::arch::x86_64::__m256i,
+    std::arch::x86_64::__m256i,
+    std::arch::x86_64::__m256i,
+) {
+    use std::arch::x86_64::*;
+    let mask = _mm256_set1_epi32(255);
+    (
+        _mm256_and_si256(value, mask),
+        _mm256_and_si256(_mm256_srli_epi32(value, 8), mask),
+        _mm256_and_si256(_mm256_srli_epi32(value, 16), mask),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_pair_average(
+    top: std::arch::x86_64::__m256i,
+    bottom: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let sum = _mm256_add_epi32(top, bottom);
+    let pairs = _mm256_hadd_epi32(sum, sum);
+    let ordered = _mm256_permutevar8x32_epi32(pairs, _mm256_setr_epi32(0, 1, 4, 5, 0, 1, 4, 5));
+    _mm256_srli_epi32(_mm256_add_epi32(ordered, _mm256_set1_epi32(2)), 2)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_limited_rgb(
+    r: std::arch::x86_64::__m256i,
+    g: std::arch::x86_64::__m256i,
+    b: std::arch::x86_64::__m256i,
+    cr: i32,
+    cg: i32,
+    cb: i32,
+    offset: i32,
+) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let weighted = _mm256_add_epi32(
+        _mm256_add_epi32(
+            _mm256_mullo_epi32(r, _mm256_set1_epi32(cr)),
+            _mm256_mullo_epi32(g, _mm256_set1_epi32(cg)),
+        ),
+        _mm256_mullo_epi32(b, _mm256_set1_epi32(cb)),
+    );
+    let value = _mm256_add_epi32(
+        _mm256_srai_epi32(_mm256_add_epi32(weighted, _mm256_set1_epi32(128)), 8),
+        _mm256_set1_epi32(offset),
+    );
+    let words = _mm_packus_epi32(
+        _mm256_castsi256_si128(value),
+        _mm256_extracti128_si256(value, 1),
+    );
+    _mm_packus_epi16(words, _mm_setzero_si128())
 }
 
 fn rgba_to_yuv420p_macroblocks_scalar(

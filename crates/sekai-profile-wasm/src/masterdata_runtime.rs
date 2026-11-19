@@ -69,6 +69,8 @@ struct PrepareRequest {
     #[serde(default)]
     demand_only: bool,
     #[serde(default)]
+    animation_demand_only: bool,
+    #[serde(default)]
     localized_text: Option<BTreeMap<String, String>>,
 }
 
@@ -282,6 +284,21 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
             ),
         }
         .map_err(|error| error.to_string())?;
+        // PERF-BROWSER-02: Use the layout compiler's shared TMP parser before
+        // font loading, SDF generation, image decoding or GPU scene creation.
+        // This is a candidate test; native preflight still decides observability.
+        if request.animation_demand_only {
+            let animated = prepared.layout_layers.iter().any(|layer| {
+                let segments =
+                    sekai_profile_core::tmp_text::parse_segments(&layer.text, layer.font_size);
+                sekai_profile_core::tmp_text::layout::uniform_line_indent_percent(&segments)
+                    .is_some()
+            });
+            return serde_json::to_string(&serde_json::json!({
+                "animationCandidate": animated,
+            }))
+            .map_err(|error| error.to_string());
+        }
         serde_json::to_string(&prepared).map_err(|error| error.to_string())
     })
 }
@@ -563,6 +580,34 @@ mod tests {
         )
         .unwrap();
         assert!(prepared.contains("FZLanTingHei-DB-GBK"));
+        // PERF-BROWSER-02: Candidate routing needs no registered font bytes or
+        // atlas. Units, mixed indentation and literal tags use the same parser
+        // as layout rather than a JavaScript regular-expression approximation.
+        for (text, expected) in [
+            ("<line-indent=50%>42</line-indent>", true),
+            ("<line-indent=20>42", false),
+            ("A<line-indent=50%>B", false),
+            ("<noparse><line-indent=50%>42</noparse>", false),
+        ] {
+            let mut candidate = card.clone();
+            candidate["texts"][0]["text"] = serde_json::json!(text);
+            let result: serde_json::Value = serde_json::from_str(
+                &super::prepare(
+                    handle,
+                    &serde_json::json!({
+                        "documentKey": "candidate", "card": candidate, "animationDemandOnly": true,
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({"animationCandidate": expected}),
+                "{text}"
+            );
+        }
         let prepared_value: serde_json::Value = serde_json::from_str(&prepared).unwrap();
         let source_key = prepared_value["layout_layers"][0]["dynamicLayerId"]
             .as_str()

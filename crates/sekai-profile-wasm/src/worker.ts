@@ -136,9 +136,12 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
         const warm = resolveAtlasRecords(mod, handle, request.payload.keys, request.payload.cached);
         if (warm.lease != null) leases.push(warm.lease);
         const missing = new Set(warm.missingKeys);
+        // PERF-BROWSER-03: Recover metrics for partial batch admissions whose
+        // earlier failed resolve never returned a record to the main thread.
+        const needsGeneration = new Set([...missing, ...(request.payload.missingMetrics ?? [])]);
         const generated: AtlasGlyphRecord[] = [];
         for (const group of request.payload.generate) {
-          const glyphs = group.glyphs.filter((entry) => missing.has(entry.key));
+          const glyphs = group.glyphs.filter((entry) => needsGeneration.has(entry.key));
           if (glyphs.length > 0) generated.push(...await generateAtlasRecords({ ...group, glyphs, chars: glyphs.map((entry) => entry.char) }));
         }
         const cold = generated.length > 0 ? resolveAtlasRecords(mod, handle, [...missing], generated) : null;
@@ -419,7 +422,7 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
         [masterDataHandle(request.payload.masterDataId)],
       );
       const profileRequest = preparationRecord(request.payload.request, "request");
-      if (profileRequest.demandOnly === true) {
+      if (profileRequest.demandOnly === true || profileRequest.animationDemandOnly === true) {
         // Localization demand phase: the core returns only localization demands
         // and the preparation must reach the main thread untouched.
         result = { kind: "prepareProfile", preparation };

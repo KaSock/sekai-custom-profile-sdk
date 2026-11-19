@@ -142,3 +142,51 @@ $env:SEKAI_PROFILE_PNG_MODE = 'fast'
 4. 五张图片加五段视频的整批结果，仍会等待浏览器阶段及所有原生动态页完成后返回。
    多视频会按原生页面并发数分批执行；此次优化针对 CPU 帧合成与缓存，不改变帧率、时长、
    编码质量或启用硬件编码。收益由具体场景决定，以部署机对比结果为准。
+
+## 组合调度、高清字形与视频转换优化（2026-11-17）
+
+本节更新前述“浏览器处理后再导出动画”的调度行为。代码中的标记可直接搜索定位：
+
+| 标记 | 代码段 | 作用 |
+| --- | --- | --- |
+| `PERF-BROWSER-02` | `bot_browser.py::_render`、`browser_bot/bridge.mjs::classify` | 整批轻量分类后，原生动态导出和浏览器静态页并行；保留页面错误隔离、排序、总返回预算及取消清理。 |
+| `PERF-BROWSER-02` | `crates/sekai-profile-wasm/src/masterdata_runtime.rs::prepare`、`src/worker.ts::prepareProfile` | 新增 `animationDemandOnly` 准备请求，使用与排版一致的 TMP 解析器判断动态程序候选，不加载字体、生成字形、解码图片或建立 GPU 场景；是否确实可见仍由原生预检决定。 |
+| `PERF-BROWSER-03` | `crates/sekai-profile-wasm/src/highResolutionSdf.ts::refineHighResolutionSdf` | 同字体、同字号批量准备高清字形，限制批量大小，预算不足拆批，保留单字形降一档和基础采样回退。 |
+| `PERF-BROWSER-03` | `crates/sekai-profile-wasm/src/atlas.rs::resolve_in_session` | 在批次内临时固定已放入的页，防止后续字形回收前面的页；成功和错误路径均释放临时租约。 |
+| `PERF-BROWSER-03` | `crates/sekai-profile-wasm/src/fontSdfAtlas.ts::buildSdfAtlas`、`src/worker.ts::resolveAtlas`、`src/worker-client.ts`、`src/protocol.ts` | 拆批重试时，补齐失败批次未返回的字形度量，避免只命中像素位置却缺少度量。 |
+| `PERF-ANIM-04` | `crates/sekai-profile/src/animation/encode/yuv.rs`、`encode/mp4.rs::resolved_yuv_converter` | 全帧和脏宏块 RGBA→YUV420 均增加 AVX2；自动选择 AVX-512、AVX2、标量。沿用整数系数和舍入顺序，强制标量及严格 AVX-512 配置仍生效。 |
+| `PERF-ANIM-05` | `crates/sekai-profile/src/animation/export.rs`、`animation/mod.rs`、`crates/sekai-profile-cli/src/bot_media.rs` | 补场景准备、动画预检及 BOT 每页分阶段日志，暴露已有的图层准备、合成、读回、YUV、编码和封装耗时。 |
+
+Xeon E5-2680 v4 支持 AVX2。默认视频转换器 `auto` 会自动使用新路径，部署后日志应显示
+`yuv_backend="avx2"`；`SEKAI_PROFILE_EXECUTOR` 控制光栅器，不是 YUV 转换器，无需为此新增环境变量。
+
+### 日志读取
+
+- `browser classification timings`：轻量分类耗时与动态候选数。
+- `native animation batch ... total_ms`：整批原生调用时间，包含首次启动、素材准备和导出等待。
+- `profile animation timings`：每页 `asset_ms`、`scene_prepare_ms`、`preflight_ms`、
+  `layer_prepare_ms`、`encode_total_ms`、`export_ms`、`static_render_ms` 和 `total_ms`。
+  `asset_ms` 包含页面解析、素材规划/获取与验证；`export_ms` 包含场景准备、预检、图层准备和整个编码过程。
+- `composite_ms`、`readback_ms`、`yuv_ms`、`codec_ms`、`mux_ms` 是
+  `encode_total_ms` 内部的细分，不能再与它相加。`full_frames`、`dirty_frames`、`reused_frames`
+  可帮助判断帧复用是否生效。`static_render_ms` 只在原生预检判定无需动画、改出 JPEG 时有值。
+- `profile animation raster timings`：有光栅遥测时输出 `capture_ms`、`edt_ms`、`sdf_execute_ms`。
+  这些可能包含图层准备和编码期间的延迟光栅工作，也是细分计时，不可与父阶段直接累加。
+
+### 构建与验证
+
+在源码机器自行执行：
+
+```powershell
+.\build-bot.ps1
+.\build-browser-bot.ps1 -FromSource
+```
+
+部署机停止服务后，同步更新原生 exe 和配套 DLL、完整 `runtime/browser-sdk/dist/`、
+`bot_browser.py` 和 `browser_bot/bridge.mjs`，再重启。无需修改 BOT 或现有配置，也无需清理图集。
+此轮没有增加按 slot 保留 GPU 资源，也没有调整帧率、时长、编码质量或线程预算。
+
+对照同一份多动态页资料及复杂静态资料，分别记录首次与重复请求的整批耗时，检查媒体数量、
+页面顺序、文字细节与动画。静态/动态并行会让 CPU 与 GPU 同时工作，实际收益以部署机测量为准。
+源码侧运行 Python/Node 回归、TypeScript 类型检查和 Rust 格式检查；新增 AVX2 像素对照、
+宏块边界、分类语义及图集批次租约的 Rust 测试，按要求不执行 Rust/WASM 编译或 Rust 测试。

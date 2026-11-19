@@ -89,6 +89,7 @@ pub fn render_profile_media(
     let mut failures = Vec::new();
     let mut total_bytes = 0usize;
     let render = |raw_page: &Value| -> Result<MediaPage, String> {
+        let page_started = std::time::Instant::now();
         let page: UserCustomProfileCard = serde_json::from_value(raw_page.clone())
             .map_err(|error| format!("invalid page: {error}"))?;
         let card = &page.custom_profile_card;
@@ -118,14 +119,19 @@ pub fn render_profile_media(
             key: &document_key,
             region: region.as_str(),
         };
+        let asset_ms = page_started.elapsed().as_secs_f64() * 1000.0;
+        let export_started = std::time::Instant::now();
         let export = renderer
             .render_animation(card, Some(&profile), document, &preset, &config)
             .map_err(|error| error.to_string())?;
+        let export_ms = export_started.elapsed().as_secs_f64() * 1000.0;
+        let mut static_render_ms = 0.0;
         let (kind, mime, data) = if export.animated {
             let encoded = export.encoded.ok_or("animated page has no artifact")?;
             validate_magic(encoded.format, &encoded.data).map_err(|error| error.to_string())?;
             ("video", "video/mp4", encoded.data)
         } else {
+            let static_started = std::time::Instant::now();
             let data = crate::render_page(
                 renderer,
                 card,
@@ -134,8 +140,52 @@ pub fn render_profile_media(
                 crate::OutputFormat::Jpeg,
                 quality,
             )?;
+            static_render_ms = static_started.elapsed().as_secs_f64() * 1000.0;
             ("image", "image/jpeg", data)
         };
+        // PERF-ANIM-05: encode_total_ms includes composition/readback/YUV/codec/
+        // mux. Its child timers are diagnostic breakdowns, not extra stages.
+        let telemetry = &export.telemetry;
+        let yuv_backend = if export.animated {
+            preset
+                .h264
+                .resolved_yuv_converter()
+                .map_err(|error| error.to_string())?
+        } else {
+            "none"
+        };
+        tracing::info!(
+            seq = page.seq,
+            animated = export.animated,
+            frames = telemetry.sampled_frames,
+            yuv_backend,
+            asset_ms,
+            scene_prepare_ms = telemetry.scene_prepare_ms,
+            preflight_ms = telemetry.preflight_ms,
+            layer_prepare_ms = telemetry.render_ms,
+            encode_total_ms = telemetry.encode_ms,
+            composite_ms = telemetry.frame_composite_ns as f64 / 1_000_000.0,
+            readback_ms = telemetry.frame_readback_ns as f64 / 1_000_000.0,
+            yuv_ms = telemetry.h264_yuv_ns as f64 / 1_000_000.0,
+            codec_ms = telemetry.h264_direct_encode_ns as f64 / 1_000_000.0,
+            mux_ms = telemetry.h264_mux_ns as f64 / 1_000_000.0,
+            full_frames = telemetry.frame_full_composites,
+            dirty_frames = telemetry.frame_dirty_composites,
+            reused_frames = telemetry.frame_reused_composites,
+            export_ms,
+            static_render_ms,
+            total_ms = page_started.elapsed().as_secs_f64() * 1000.0,
+            "profile animation timings"
+        );
+        if let Some(raster) = telemetry.render_telemetry.as_ref() {
+            tracing::info!(
+                seq = page.seq,
+                capture_ms = raster.timings.sdf_capture_ns as f64 / 1_000_000.0,
+                edt_ms = raster.timings.realtime_edt_generation_ns as f64 / 1_000_000.0,
+                sdf_execute_ms = raster.timings.sdf_execute_ns as f64 / 1_000_000.0,
+                "profile animation raster timings"
+            );
+        }
         Ok(MediaPage {
             kind,
             mime,

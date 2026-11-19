@@ -83,7 +83,7 @@ export type RendererWorkerRequest =
   | { id: number; kind: "planGlyphs"; payload: GlyphBatchRequest }
   | { id: number; kind: "buildGlyphs"; payload: GlyphBatchRequest }
   | { id: number; kind: "createAtlas"; payload: { pageWidth?: number; pageHeight?: number; hardPages?: number } }
-  | { id: number; kind: "resolveAtlas"; payload: { atlasId: string; keys: string[]; cached: AtlasGlyphRecord[]; generate: AtlasGenerateRequest[] } }
+  | { id: number; kind: "resolveAtlas"; payload: { atlasId: string; keys: string[]; cached: AtlasGlyphRecord[]; generate: AtlasGenerateRequest[]; missingMetrics?: string[] } }
   | { id: number; kind: "atlasPages"; payload: { atlasId: string; revisions: Array<{ page: number; revision: number }> } }
   | { id: number; kind: "releaseAtlas"; payload: { atlasId: string; lease: number } }
   | { id: number; kind: "destroyAtlas"; payload: { atlasId: string } }

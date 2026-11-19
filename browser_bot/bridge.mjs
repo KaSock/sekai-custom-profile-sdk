@@ -107,5 +107,31 @@ export async function createBridge(BrowserRenderer) {
     }
   }
 
-  return { initialize, render };
+  // PERF-BROWSER-02: Classify the whole request without creating scenes. Keep
+  // full profile metadata for component text and let the shared core parse TMP.
+  async function classify({ profile, documentKey }) {
+    if (!renderer || !masterData) throw new Error("Browser slot has not initialized");
+    const started = performance.now();
+    const pages = [];
+    for (const [index, page] of profile.userCustomProfileCards.entries()) {
+      try {
+        if (!page || typeof page !== "object" || Array.isArray(page)) throw new Error("invalid profile page");
+        const preparation = await masterData.prepareProfile({
+          documentKey: `${documentKey}-${index}`, pageIndex: 0,
+          profile: { ...profile, userCustomProfileCards: [page] },
+          animationDemandOnly: true,
+        });
+        if (typeof preparation.animationCandidate !== "boolean") {
+          throw new Error("Browser SDK lacks animation classification; rebuild from source");
+        }
+        pages.push({ index, animated: preparation.animationCandidate });
+      } catch (error) {
+        // A classification failure must still try the normal page path.
+        pages.push({ index, animated: false, error: String(error) });
+      }
+    }
+    return { pages, timing: { classify_ms: Math.round(performance.now() - started) } };
+  }
+
+  return { initialize, classify, render };
 }

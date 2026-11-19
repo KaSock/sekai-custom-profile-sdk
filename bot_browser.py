@@ -268,6 +268,28 @@ class BrowserWorker:
         serial = self.request_serial
         pages = profile['userCustomProfileCards']
 
+        # PERF-BROWSER-02: Split before font/SDF/image/GPU preparation. Native
+        # animation export then overlaps the browser's static-page work.
+        slot = await self.slots.get()
+        try:
+            classification = await slot['page'].evaluate(
+                'async payload => (await window.alliumReady).classify(payload)',
+                {'profile': profile, 'documentKey': f'bot-classify-{serial}'},
+            )
+            candidates = {entry['index'] for entry in classification['pages'] if entry['animated']}
+            LOG.info('[%s] browser classification timings=%s animated_candidates=%s',
+                     self.region, classification['timing'], len(candidates))
+            for entry in classification['pages']:
+                if entry.get('error'):
+                    LOG.warning('[%s] page index=%s classification failed; trying full scene: %s',
+                                self.region, entry['index'], entry['error'])
+        except Exception as exc:
+            LOG.warning('[%s] browser classification unavailable; trying full scenes: %s',
+                        self.region, exc)
+            candidates = set()
+        finally:
+            self.slots.put_nowait(slot)
+
         async def render_one(index, raw_page):
             slot = await self.slots.get()
             seq = raw_page.get('seq') if isinstance(raw_page, dict) else None
@@ -292,7 +314,33 @@ class BrowserWorker:
             finally:
                 self.slots.put_nowait(slot)
 
-        results = await asyncio.gather(*(render_one(index, page) for index, page in enumerate(pages)))
+        async def export_animated(animated):
+            started = time.monotonic()
+            LOG.info('[%s] exporting %s animated candidates with the native backend',
+                     self.region, len(animated))
+            result = await self.native.render({**profile, 'userCustomProfileCards': animated})
+            LOG.info('[%s] native animation batch pages=%s total_ms=%s (includes startup/assets/export)',
+                     self.region, len(animated), round((time.monotonic() - started) * 1000))
+            return result
+
+        native_task = asyncio.create_task(export_animated(
+            [page for index, page in enumerate(pages) if index in candidates]
+        )) if candidates else None
+        static_task = asyncio.gather(*(render_one(index, page) for index, page in enumerate(pages)
+                                      if index not in candidates))
+        try:
+            # Await together: failure/cancellation drains both jobs before close
+            # can replace slot queues or terminate the native NDJSON connection.
+            jobs = [static_task] + ([native_task] if native_task else [])
+            await asyncio.gather(*jobs)
+            results = static_task.result()
+            native_result = native_task.result() if native_task else None
+        finally:
+            for job in (static_task, native_task):
+                if job is not None and not job.done():
+                    job.cancel()
+            await asyncio.gather(*(job for job in (static_task, native_task) if job is not None),
+                                 return_exceptions=True)
         items, failures, animated = [], [], []
         for page, result, error in results:
             if error is not None:
@@ -304,11 +352,12 @@ class BrowserWorker:
         # Browser SDK exposes PNG snapshots, not the native MP4 exporter.
         # Never silently replace an animated page with a still image.
         if animated:
-            LOG.info('[%s] exporting %s animated pages with the native backend',
-                     self.region, len(animated))
-            native = await self.native.render({**profile, 'userCustomProfileCards': animated})
+            native = await export_animated(animated)
             items.extend({**item, 'backend': 'native-animation'} for item in native['items'])
             failures.extend(native.get('failures', []))
+        if native_result is not None:
+            items.extend({**item, 'backend': 'native-animation'} for item in native_result['items'])
+            failures.extend(native_result.get('failures', []))
         items.sort(key=lambda item: item.get('seq') if isinstance(item.get('seq'), (int, float))
                    else float('inf'))
         accepted, total_bytes = [], 0

@@ -105,6 +105,7 @@ function atlasWorker(options = {}) {
   const heap = new Uint8Array(65536);
   let allocation = 64;
   let resolves = 0;
+  let rasterCalls = 0;
   const pinned = new Set();
   const releases = [];
   const module = {
@@ -131,8 +132,9 @@ function atlasWorker(options = {}) {
         if (resolves === 2 && options.failColdResolve) throw new Error("atlas budget exhausted");
         const lease = resolves === 1 ? 11 : 12;
         pinned.add(lease);
-        value = { lease, placements: [], missingKeys: resolves === 1 || options.missingCold ? ["cold"] : [], stats: {} };
+        value = { lease, placements: [], missingKeys: (resolves === 1 && !options.allWarm) || options.missingCold ? ["cold"] : [], stats: {} };
       } else if (name === "sdf_layout_freetype_build_glyph_json_edt") {
+        rasterCalls++;
         if (options.failRaster) throw new Error("glyph rasterization failed");
         value = { glyphs: [{ ch: "A", width: 1, height: 1, pixels_base64: "AQ==" }] };
       } else {
@@ -161,7 +163,7 @@ function atlasWorker(options = {}) {
     pending.set(id, resolve);
     context.onmessage({ data: { id, kind, payload } });
   });
-  return { send, pinned, releases };
+  return { send, pinned, releases, rasterCalls: () => rasterCalls };
 }
 
 async function prepareAtlas(fixture) {
@@ -186,6 +188,19 @@ test("successful atlas resolution transfers both leases to the caller", async ()
   assert.deepEqual([...fixture.pinned], [11, 12]);
   assert.deepEqual(fixture.releases, []);
   for (const lease of response.result.result.leases) {
+    await fixture.send("releaseAtlas", { atlasId: payload.atlasId, lease });
+  }
+  assert.equal(fixture.pinned.size, 0);
+});
+
+test("warm pixels missing main-thread metrics are regenerated and returned on retry", async () => {
+  const fixture = atlasWorker({ allWarm: true });
+  const payload = await prepareAtlas(fixture);
+  const result = await fixture.send("resolveAtlas", { ...payload, missingMetrics: ["cold"] });
+  assert.equal(result.ok, true);
+  assert.equal(fixture.rasterCalls(), 1);
+  assert.equal(result.result.result.generated[0].key, "cold");
+  for (const lease of result.result.result.leases) {
     await fixture.send("releaseAtlas", { atlasId: payload.atlasId, lease });
   }
   assert.equal(fixture.pinned.size, 0);

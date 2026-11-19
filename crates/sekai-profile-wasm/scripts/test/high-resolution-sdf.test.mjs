@@ -68,25 +68,30 @@ test("tier replacement preserves font-space sample alignment, layout and materia
   }
 });
 
-function fixture({ failSize, failSizes, cancel, failStatsAt, atlasHardPages = 16 } = {}) {
+function fixture({ failSize, failSizes, failBatchAbove, failPartialBatch, cancel, failStatsAt, atlasHardPages = 16 } = {}) {
   const sourceHash = "11".repeat(32);
   const fonts = [{ region: "cn", family: "Synthetic", sourceHash }];
   const requests = ["A", "B"].map(char => ({ region: "cn", family: "Synthetic", fontSourceHash: sourceHash, char }));
   const records = new Map();
-  const calls = { pools: 0, attempted: [], generated: [], leases: [], released: [] };
+  const calls = { pools: 0, attempted: [], batchSizes: [], generated: [], leases: [], released: [] };
   const stats = () => ({ pages: 2, atlasBytes: 2 * 2048 ** 2, pinnedPages: 2, evictions: 0 });
+  let partialFailed = false;
   const atlas = {
     initialStats: stats(),
-    async resolve(keys, cached, generate) {
+    async resolve(keys, cached, generate, missingMetrics = []) {
       for (const value of cached) records.set(value.key, value);
       const generated = [];
       for (const group of generate) {
         calls.attempted.push({ pointSize: group.pointSize ?? 75 });
+        calls.batchSizes.push(group.glyphs.length);
+        if (group.pointSize != null && group.glyphs.length > (failBatchAbove ?? Infinity)) {
+          throw new Error("MEMORY_BUDGET_EXCEEDED: batch exceeds remaining capacity");
+        }
         if ((failSize != null && group.pointSize === failSize) || failSizes?.has(group.pointSize)) {
           throw new Error("MEMORY_BUDGET_EXCEEDED: test pool is full");
         }
         for (const glyph of group.glyphs) {
-          if (records.has(glyph.key)) continue;
+          if (records.has(glyph.key) && !missingMetrics.includes(glyph.key)) continue;
           const r = (group.pointSize ?? 75) / 75;
           const record = { key: glyph.key, glyphIndex: glyph.glyphIndex,
             width: 20 * r, height: 30 * r, advance: 10 * r,
@@ -96,6 +101,10 @@ function fixture({ failSize, failSizes, cancel, failStatsAt, atlasHardPages = 16
           records.set(record.key, record);
           generated.push(record);
           calls.generated.push({ char: glyph.char, pointSize: group.pointSize ?? 75 });
+          if (failPartialBatch && !partialFailed && group.pointSize != null && group.glyphs.length > 1) {
+            partialFailed = true;
+            throw new Error("MEMORY_BUDGET_EXCEEDED: partially admitted batch");
+          }
         }
       }
       const lease = calls.leases.length + 1;
@@ -176,6 +185,45 @@ test("a full atlas keeps base glyphs usable and releases every acquired tier", a
   assert.equal(result.instances[1].atlasPage, 1);
   assert.match(logs[0], /requested=2 upgraded=2 downgraded=1 fallback=0 atlas_pages=2\/16/);
   assert.deepEqual(f.calls.atlasOptions, { hardPages: 16 });
+  await result.atlas.release();
+  assert.deepEqual(f.calls.released, f.calls.leases);
+});
+
+test("equal font and size demands share one resolve and one lease, including warm reuse", async () => {
+  const f = fixture();
+  for (let pass = 0; pass < 2; pass++) {
+    const base = await f.build();
+    const before = f.calls.leases.length;
+    const result = await refineHighResolutionSdf(base,
+      [f.instance(base, "A", 4), f.instance(base, "B", 4)], f.operations, f.options);
+    assert.equal(f.calls.leases.length - before, 1);
+    assert.equal(result.instances.filter(instance => instance.atlasPage === 1).length, 2);
+    await result.atlas.release();
+  }
+  assert.equal(f.calls.generated.filter(glyph => glyph.pointSize === 300).length, 2);
+  assert.equal(new Set(f.calls.released).size, f.calls.leases.length);
+  assert.equal(f.calls.pools, 1);
+});
+
+test("a batch budget failure splits glyphs before considering resolution downgrade", async () => {
+  const f = fixture({ failBatchAbove: 1 });
+  const base = await f.build();
+  const result = await refineHighResolutionSdf(base,
+    [f.instance(base, "A", 4), f.instance(base, "B", 4)], f.operations, f.options);
+  assert.deepEqual(f.calls.batchSizes.slice(1), [2, 1, 1]);
+  assert.deepEqual(f.calls.generated.filter(glyph => glyph.pointSize !== 75),
+    [{ char: "A", pointSize: 300 }, { char: "B", pointSize: 300 }]);
+  await result.atlas.release();
+  assert.deepEqual(f.calls.released, f.calls.leases);
+});
+
+test("split retry recovers metrics for pixels admitted before a batch failed", async () => {
+  const f = fixture({ failPartialBatch: true });
+  const base = await f.build();
+  const result = await refineHighResolutionSdf(base,
+    [f.instance(base, "A", 4), f.instance(base, "B", 4)], f.operations, f.options);
+  assert.equal(result.instances.filter(instance => instance.atlasPage === 1).length, 2);
+  assert.equal(f.calls.generated.filter(glyph => glyph.char === "A" && glyph.pointSize === 300).length, 2);
   await result.atlas.release();
   assert.deepEqual(f.calls.released, f.calls.leases);
 });

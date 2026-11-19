@@ -56,6 +56,32 @@ impl Default for H264EncoderConfig {
 }
 
 impl H264EncoderConfig {
+    /// PERF-ANIM-04: Report the same runtime dispatch used by both full-frame
+    /// and dirty-macroblock conversion. Auto prefers AVX-512, then AVX2.
+    pub fn resolved_yuv_converter(&self) -> Result<&'static str, AnimationError> {
+        self.validate()?;
+        #[cfg(target_arch = "x86_64")]
+        if self.yuv_converter != H264YuvConverter::Scalar
+            && std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            return Ok("avx512");
+        }
+        if self.require_avx512
+            || self.validate_avx512
+            || self.yuv_converter == H264YuvConverter::Avx512
+        {
+            return Err(AnimationError::Avx512Unavailable);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if self.yuv_converter == H264YuvConverter::Auto
+            && std::arch::is_x86_feature_detected!("avx2")
+        {
+            return Ok("avx2");
+        }
+        Ok("scalar")
+    }
+
     pub fn validate(&self) -> Result<(), AnimationError> {
         if self.qp > 51 {
             return Err(AnimationError::InvalidH264Qp(self.qp));

@@ -188,7 +188,12 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         }
 
         async def evaluate(_code, payload):
+            if '.classify(' in _code:
+                return {'pages': [{'index': index, 'animated': page['seq'] == 2}
+                                  for index, page in enumerate(payload['profile']['userCustomProfileCards'])],
+                        'timing': {'classify_ms': 1}}
             seq = payload['profile']['userCustomProfileCards'][0]['seq']
+            self.assertNotEqual(seq, 2, 'animation candidate must skip scene preparation')
             if seq == 4:
                 raise RuntimeError('bad page')
             return {
@@ -208,10 +213,89 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.render.call_args.args[0]['userCustomProfileCards'], [{'seq': 2}])
         self.assertEqual(self.native.render.call_args.args[0]['userId'], 'test-player')
 
+    async def test_native_animation_and_static_browser_work_overlap(self):
+        native_started, static_finished = asyncio.Event(), asyncio.Event()
+
+        async def native_render(profile):
+            native_started.set()
+            await static_finished.wait()
+            return {'items': [{'seq': 2, 'bytes': 3}], 'failures': []}
+
+        async def evaluate(code, _payload):
+            if '.classify(' in code:
+                return {'pages': [{'index': 1, 'animated': True}], 'timing': {}}
+            await native_started.wait()
+            static_finished.set()
+            return {'animated': False, 'timing': {}, 'item': {'seq': 1, 'bytes': 4}}
+
+        self.native.render.side_effect = native_render
+        self.worker.start = AsyncMock()
+        self.worker.slots.put_nowait({'page': types.SimpleNamespace(evaluate=evaluate)})
+        result = await asyncio.wait_for(self.worker._render(
+            {'userCustomProfileCards': [{'seq': 1}, {'seq': 2}]}), 2)
+        self.assertEqual([item['seq'] for item in result['items']], [1, 2])
+
+    async def test_cancel_drains_both_backends_before_closing(self):
+        native_started, static_started = asyncio.Event(), asyncio.Event()
+        cancelled = set()
+
+        async def native_render(_profile):
+            native_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add('native')
+
+        async def evaluate(code, _payload):
+            if '.classify(' in code:
+                return {'pages': [{'index': 1, 'animated': True}], 'timing': {}}
+            static_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add('browser')
+
+        self.native.render.side_effect = native_render
+        self.worker.start = AsyncMock()
+        self.worker.slots.put_nowait({'page': types.SimpleNamespace(evaluate=evaluate)})
+        job = asyncio.create_task(self.worker.render({'userCustomProfileCards': [{'seq': 1}, {'seq': 2}]}))
+        await asyncio.wait_for(asyncio.gather(native_started.wait(), static_started.wait()), 2)
+        job.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await job
+        self.assertEqual(cancelled, {'native', 'browser'})
+        self.native.close.assert_awaited_once()
+
+    async def test_classification_error_uses_full_scene_and_late_native_fallback(self):
+        async def evaluate(code, _payload):
+            if '.classify(' in code:
+                raise RuntimeError('old bridge')
+            return {'animated': True, 'timing': {}}
+
+        self.worker.start = AsyncMock()
+        self.worker.slots.put_nowait({'page': types.SimpleNamespace(evaluate=evaluate)})
+        await self.worker._render({'userCustomProfileCards': [{'seq': 2}]})
+        self.native.render.assert_awaited_once()
+
+    async def test_combined_backends_share_response_budget_in_seq_order(self):
+        async def evaluate(code, _payload):
+            if '.classify(' in code:
+                return {'pages': [{'index': 0, 'animated': True}], 'timing': {}}
+            return {'animated': False, 'timing': {}, 'item': {'seq': 1, 'bytes': MEDIA_LIMIT}}
+
+        self.native.render.return_value = {'items': [{'seq': 2, 'bytes': 1}], 'failures': []}
+        self.worker.start = AsyncMock()
+        self.worker.slots.put_nowait({'page': types.SimpleNamespace(evaluate=evaluate)})
+        result = await self.worker._render({'userCustomProfileCards': [{'seq': 2}, {'seq': 1}]})
+        self.assertEqual([item['seq'] for item in result['items']], [1])
+        self.assertEqual(result['failures'][0]['seq'], 2)
+
     async def test_media_limit_matches_native_protocol(self):
         self.worker.start = AsyncMock()
 
         async def evaluate(_code, payload):
+            if '.classify(' in _code:
+                return {'pages': [{'index': 0, 'animated': False}], 'timing': {}}
             return {'animated': False, 'timing': {}, 'item': {
                 'seq': 1, 'bytes': MEDIA_LIMIT + 1, 'data': '', 'kind': 'image',
             }}

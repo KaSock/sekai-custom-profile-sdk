@@ -7,7 +7,7 @@ const original = {
 };
 afterEach(() => Object.assign(globalThis, original));
 
-function fixture({ animated = false, failDraw = false, missingResource = false } = {}) {
+function fixture({ animated = false, failDraw = false, missingResource = false, failClassify = false } = {}) {
   const calls = [];
   const gl = {
     VENDOR: 1, RENDERER: 2,
@@ -47,7 +47,11 @@ function fixture({ animated = false, failDraw = false, missingResource = false }
       return {
         async loadMasterData(_revision, load) {
           await load({ table: "test", optional: false }, { signal: new AbortController().signal });
-          return {};
+          return { async prepareProfile(request) {
+            calls.push(["classify", request]);
+            if (failClassify) throw new Error("bad classification");
+            return { animationCandidate: animated };
+          } };
         },
         async createProfileScene() {
           if (missingResource) {
@@ -95,6 +99,32 @@ test("GPU failure still releases the scene", async () => {
   await bridge.initialize("cn");
   await assert.rejects(bridge.render(payload), /context lost/);
   assert.deepEqual(calls, ["draw", "destroy"]);
+});
+
+test("classification preserves profile context and skips fonts, images, scenes and GPU work", async () => {
+  const { sdk, calls } = fixture({ animated: true });
+  const bridge = await createBridge(sdk);
+  await bridge.initialize("jp");
+  const profile = { userId: "player", userCustomProfileCards: [{ seq: 3 }, { seq: 1 }] };
+  const result = await bridge.classify({ profile, documentKey: "classify-test" });
+  assert.deepEqual(result.pages, [{ index: 0, animated: true }, { index: 1, animated: true }]);
+  assert.equal(calls.length, 2);
+  for (const [index, [name, request]] of calls.entries()) {
+    assert.equal(name, "classify");
+    assert.equal(request.animationDemandOnly, true);
+    assert.equal(request.profile.userId, "player");
+    assert.deepEqual(request.profile.userCustomProfileCards, [profile.userCustomProfileCards[index]]);
+  }
+});
+
+test("classification failures leave each page eligible for normal rendering", async () => {
+  const { sdk } = fixture({ failClassify: true });
+  const bridge = await createBridge(sdk);
+  await bridge.initialize("cn");
+  const result = await bridge.classify(payload);
+  assert.equal(result.pages[0].animated, false);
+  assert.match(result.pages[0].error, /bad classification/);
+  assert.equal((await bridge.render(payload)).item.kind, "image");
 });
 
 test("resource provider uses the local bridge and records unavailable resources", async () => {

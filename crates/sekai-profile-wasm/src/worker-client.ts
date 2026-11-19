@@ -360,9 +360,9 @@ export class RendererAtlas {
     readonly initialStats: AtlasStats,
   ) {}
 
-  async resolve(keys: string[], cached: AtlasGlyphRecord[], generate: AtlasGenerateRequest[]): Promise<AtlasResolveResult> {
+  async resolve(keys: string[], cached: AtlasGlyphRecord[], generate: AtlasGenerateRequest[], missingMetrics: string[] = []): Promise<AtlasResolveResult> {
     this.assertAlive();
-    const result = await this.client.sceneRequest("resolveAtlas", { atlasId: this.id, keys, cached, generate });
+    const result = await this.client.sceneRequest("resolveAtlas", { atlasId: this.id, keys, cached, generate, missingMetrics });
     if (result.kind !== "resolveAtlas") throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid atlas resolution");
     return result.result;
   }

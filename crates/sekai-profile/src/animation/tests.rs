@@ -44,6 +44,113 @@ fn avx512_yuv420_matches_scalar_at_profile_export_resolution() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn avx2_yuv420_is_byte_exact_for_tails_edges_and_unaligned_buffers() {
+    if !std::arch::is_x86_feature_detected!("avx2") {
+        return;
+    }
+    let dimensions = (2..=70)
+        .step_by(2)
+        .map(|width| (width, 6))
+        .chain([(1832, 816)]);
+    for (width, height) in dimensions {
+        let mut storage = vec![0u8];
+        storage.extend(deterministic_rgba(width, height));
+        let rgba = &mut storage[1..];
+        // Include black/white and all RGB cube corners with varying alpha.
+        for (i, pixel) in rgba.chunks_exact_mut(4).take(8).enumerate() {
+            pixel.copy_from_slice(&[
+                if i & 1 != 0 { 255 } else { 0 },
+                if i & 2 != 0 { 255 } else { 0 },
+                if i & 4 != 0 { 255 } else { 0 },
+                i as u8,
+            ]);
+        }
+        let len = width * height * 3 / 2;
+        let mut expected = vec![0; len];
+        rgba_to_yuv420p_scalar(rgba, width, height, &mut expected);
+        let mut actual = vec![0xCD; len + 6];
+        // SAFETY: runtime AVX2 detection and exact even-dimension slices.
+        unsafe { rgba_to_yuv420p_avx2(rgba, width, height, &mut actual[3..len + 3]) };
+        assert_eq!(&actual[3..len + 3], &expected, "{width}x{height}");
+        assert_eq!(&actual[..3], &[0xCD; 3]);
+        assert_eq!(&actual[len + 3..], &[0xCD; 3]);
+    }
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn avx2_macroblock_updates_preserve_other_pixels_and_handle_clipped_edges() {
+    if !std::arch::is_x86_feature_detected!("avx2") {
+        return;
+    }
+    for width in [2usize, 8, 10, 16, 18, 24, 26, 34] {
+        let height = 18;
+        let first = deterministic_rgba(width, height);
+        let mut second = first.clone();
+        let mb_width = width.div_ceil(16);
+        let last = (mb_width * height.div_ceil(16) - 1) as u32;
+        let changed = [0, last];
+        for (i, pixel) in second.chunks_exact_mut(4).enumerate() {
+            let mb = (i / width / 16 * mb_width + i % width / 16) as u32;
+            if changed.contains(&mb) {
+                pixel[0] ^= 255;
+                pixel[1] = pixel[1].wrapping_add(113);
+                pixel[2] ^= 127;
+                pixel[3] = 0;
+            }
+        }
+        let mut partial = vec![0; width * height * 3 / 2];
+        rgba_to_yuv420p_scalar(&first, width, height, &mut partial);
+        let mut expected = vec![0; partial.len()];
+        rgba_to_yuv420p_scalar(&second, width, height, &mut expected);
+        // SAFETY: detected AVX2, exact buffers and valid macroblock indices.
+        unsafe { rgba_to_yuv420p_macroblocks_avx2(&second, width, height, &changed, &mut partial) };
+        assert_eq!(partial, expected, "width={width}");
+        // Empty updates must not touch the initialized planes.
+        unsafe { rgba_to_yuv420p_macroblocks_avx2(&first, width, height, &[], &mut partial) };
+        assert_eq!(partial, expected);
+    }
+}
+
+#[test]
+fn yuv_runtime_selection_preserves_scalar_override_and_strict_avx512() {
+    let scalar = H264EncoderConfig {
+        yuv_converter: H264YuvConverter::Scalar,
+        ..H264EncoderConfig::default()
+    };
+    assert_eq!(scalar.resolved_yuv_converter().unwrap(), "scalar");
+    #[cfg(target_arch = "x86_64")]
+    {
+        let expected = if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            "avx512"
+        } else if std::arch::is_x86_feature_detected!("avx2") {
+            "avx2"
+        } else {
+            "scalar"
+        };
+        assert_eq!(
+            H264EncoderConfig::default()
+                .resolved_yuv_converter()
+                .unwrap(),
+            expected
+        );
+        if expected != "avx512" {
+            let strict = H264EncoderConfig {
+                require_avx512: true,
+                ..H264EncoderConfig::default()
+            };
+            assert!(matches!(
+                strict.resolved_yuv_converter(),
+                Err(AnimationError::Avx512Unavailable)
+            ));
+        }
+    }
+}
+
+#[test]
 fn yuv420_scratch_reuse_overwrites_dirty_storage() {
     let width = 4;
     let height = 2;

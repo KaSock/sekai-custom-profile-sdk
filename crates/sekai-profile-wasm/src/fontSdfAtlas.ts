@@ -182,7 +182,11 @@ export async function buildSdfAtlas(
   const missing = [...unique.values()].filter((value) => !persisted.has(value.identity.opaqueKey));
   const generate = generationGroups(fontSources, missing, plan.backend, plan.supersample, options.pointSize == null ? undefined : plan.baseSize);
   const workerBefore = await options.worker.stats();
-  const result = await engine.atlas.resolve([...unique.keys()], cached, generate);
+  // PERF-BROWSER-03: A failed batch can leave unpinned pixels in the WASM
+  // pool without delivering their metrics. Regenerate those records on retry
+  // rather than treating their placements alone as complete session hits.
+  const missingMetrics = [...unique.keys()].filter((key) => !engine.metrics.has(key));
+  const result = await engine.atlas.resolve([...unique.keys()], cached, generate, missingMetrics);
   try {
     engine.latestStats = result.stats;
     const placementByKey = new Map(result.placements.map((entry) => [entry.key, entry.placement] as const));

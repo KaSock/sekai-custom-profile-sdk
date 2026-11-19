@@ -469,8 +469,31 @@ pub fn with_session<T>(
 }
 
 pub fn resolve(handle: u32, request: AtlasResolveRequest) -> Result<AtlasResolveResponse, String> {
-    with_session(handle, |session| {
+    with_session(handle, |session| resolve_in_session(session, request))
+}
+
+fn resolve_in_session(
+    session: &mut AtlasSession,
+    request: AtlasResolveRequest,
+) -> Result<AtlasResolveResponse, String> {
+    // PERF-BROWSER-03: Prevent later records in a batch from recycling earlier
+    // records' pages. Temporary pins are released on success and every error;
+    // the returned lease alone owns the final successful batch.
+    let mut temporary_leases = Vec::new();
+    let result = (|| {
         let mut keys = request.keys;
+        let existing: Vec<_> = keys
+            .iter()
+            .filter(|key| session.placement(key).is_some())
+            .cloned()
+            .collect();
+        if !existing.is_empty() {
+            temporary_leases.push(
+                session
+                    .acquire(&existing)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
         for record in request.records {
             let key = record.key;
             let placement = if let Some(existing) = session.placement(&key) {
@@ -489,6 +512,11 @@ pub fn resolve(handle: u32, request: AtlasResolveRequest) -> Result<AtlasResolve
                     .map_err(|error| error.to_string())?
             };
             let _ = placement;
+            temporary_leases.push(
+                session
+                    .acquire(std::slice::from_ref(&key))
+                    .map_err(|error| error.to_string())?,
+            );
             keys.push(key);
         }
         keys.sort();
@@ -519,7 +547,11 @@ pub fn resolve(handle: u32, request: AtlasResolveRequest) -> Result<AtlasResolve
             missing_keys,
             stats: session.stats(),
         })
-    })
+    })();
+    for lease in temporary_leases {
+        session.release(lease);
+    }
+    result
 }
 
 pub fn pages_since(
@@ -563,6 +595,49 @@ mod tests {
             width: 5,
             height: 5,
             pixels: vec![value; 25],
+        }
+    }
+
+    #[test]
+    fn batched_resolve_pins_records_and_releases_temporary_leases_on_failure() {
+        let request = || super::AtlasResolveRequest {
+            keys: vec!["alpha".into(), "beta".into()],
+            records: ["alpha", "beta"]
+                .into_iter()
+                .map(|key| super::AtlasRasterRecord {
+                    key: key.into(),
+                    width: 5,
+                    height: 5,
+                    pixels_base64: base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        [25u8; 25],
+                    ),
+                })
+                .collect(),
+        };
+        for pages in [1, 2] {
+            let mut atlas = AtlasSession::new(AtlasConfig {
+                page_width: 8,
+                page_height: 8,
+                hard_pages: pages,
+            })
+            .unwrap();
+            let result = super::resolve_in_session(&mut atlas, request());
+            assert_eq!(atlas.stats().evictions, 0);
+            if pages == 1 {
+                assert!(result.unwrap_err().contains("MEMORY_BUDGET_EXCEEDED"));
+                assert_eq!(atlas.stats().pinned_pages, 0);
+            } else {
+                let result = result.unwrap();
+                assert!(result.missing_keys.is_empty());
+                assert_ne!(
+                    result.placements[0].placement.page,
+                    result.placements[1].placement.page
+                );
+                assert_eq!(atlas.stats().pinned_pages, 2);
+                assert!(atlas.release(result.lease.unwrap()));
+                assert_eq!(atlas.stats().pinned_pages, 0);
+            }
         }
     }
 

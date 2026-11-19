@@ -93,33 +93,72 @@ export async function refineHighResolutionSdf(
   try {
     // Resolve one unique font/glyph at a time: each successful page is pinned
     // before another raster can evict it. All tiers share the configured pool.
-    for (const [key, { glyph, pointSize }] of demands) {
+    // PERF-BROWSER-03: Batch equal font/size demands to amortize worker RPC,
+    // planning, hashing and stats. Successful batches pin their pages together.
+    // The per-glyph path described above remains the budget fallback: split a
+    // failed batch, then try at most one lower tier for an individual glyph.
+    type Demand = { key: string; glyph: GlyphInfo; pointSize: number };
+    const groups = new Map<string, Demand[]>();
+    for (const [key, demand] of demands) {
+      const { glyph, pointSize } = demand;
+      const groupKey = `${glyph.region}\0${glyph.fontSourceHash}\0${glyph.family}\0${pointSize}`;
+      const group = groups.get(groupKey) ?? [];
+      group.push({ key, ...demand });
+      groups.set(groupKey, group);
+    }
+    async function resolveBatch(batch: Demand[], pointSize: number): Promise<void> {
       options.signal?.throwIfAborted();
-      const request: GlyphRequest = { region: glyph.region, family: glyph.family,
-        fontSourceHash: glyph.fontSourceHash, char: glyph.char };
-      const lowerTier = Math.floor((pointSize - 1) / base.baseSize) * base.baseSize;
-      const candidates = lowerTier > base.baseSize * MIN_MAGNIFICATION
-        ? [pointSize, lowerTier] : [pointSize];
-      let sampled: SdfAtlas | null = null;
-      for (const candidate of candidates) {
-        try {
-          sampled = await buildSdfAtlas(options.fonts, [request], {
-            worker: options.worker, persistence: options.persistence, pointSize: candidate,
-            sessionContractId: base.contractId, atlasHardPages: options.atlasHardPages,
-          }, options.supersample, base.sdfBackend);
-          if (candidate < pointSize) downgraded += 1;
-          break;
-        } catch (error) {
-          if (!String(error).includes("MEMORY_BUDGET_EXCEEDED")) throw error;
+      const requests: GlyphRequest[] = batch.map(({ glyph }) => ({ region: glyph.region,
+        family: glyph.family, fontSourceHash: glyph.fontSourceHash, char: glyph.char }));
+      let sampled: SdfAtlas;
+      try {
+        sampled = await buildSdfAtlas(options.fonts, requests, {
+          worker: options.worker, persistence: options.persistence, pointSize,
+          sessionContractId: base.contractId, atlasHardPages: options.atlasHardPages,
+        }, options.supersample, base.sdfBackend);
+      } catch (error) {
+        if (!String(error).includes("MEMORY_BUDGET_EXCEEDED")) throw error;
+        if (batch.length > 1) {
+          const middle = Math.ceil(batch.length / 2);
+          await resolveBatch(batch.slice(0, middle), pointSize);
+          await resolveBatch(batch.slice(middle), pointSize);
+        } else {
+          const lowerTier = Math.floor((pointSize - 1) / base.baseSize) * base.baseSize;
+          if (pointSize === batch[0].pointSize && lowerTier > base.baseSize * MIN_MAGNIFICATION) {
+            await resolveBatch(batch, lowerTier);
+          } else {
+            skipped += 1;
+          }
         }
-      }
-      if (!sampled) {
-        skipped += 1;
-        continue;
+        return;
       }
       acquired.push(sampled);
-      const target = sampled.glyphs.get(key);
-      if (target?.drawable) replacements.set(key, { glyph: target, atlas: sampled });
+      for (const { key, pointSize: requestedSize } of batch) {
+        const target = sampled.glyphs.get(key);
+        if (target?.drawable) {
+          replacements.set(key, { glyph: target, atlas: sampled });
+          if (pointSize < requestedSize) downgraded += 1;
+        }
+      }
+    }
+    for (const group of groups.values()) {
+      // Bound temporary raster output to roughly one atlas page and 16 glyphs.
+      // An individual large glyph is still allowed; the pool enforces its cap.
+      let batch: Demand[] = [];
+      let pixels = 0;
+      for (const demand of group) {
+        const scale = demand.pointSize / base.baseSize;
+        const estimate = Math.ceil(demand.glyph.width * scale + 2)
+          * Math.ceil(demand.glyph.height * scale + 2);
+        if (batch.length && (batch.length >= 16 || pixels + estimate > base.width * base.height)) {
+          await resolveBatch(batch, batch[0].pointSize);
+          batch = [];
+          pixels = 0;
+        }
+        batch.push(demand);
+        pixels += estimate;
+      }
+      if (batch.length) await resolveBatch(batch, batch[0].pointSize);
     }
     options.signal?.throwIfAborted();
     const refined = instances.map((instance) => {

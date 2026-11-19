@@ -257,6 +257,12 @@ pub struct AnimationExportTelemetry {
     pub layer_raster_bytes: usize,
     pub layer_scratch_peak_bytes: usize,
     pub peak_export_bytes: usize,
+    /// PERF-ANIM-05: Initial semantic scene construction, before preflight.
+    #[serde(default)]
+    pub scene_prepare_ms: f64,
+    /// Observability/convergence preflight, before layer rasterization.
+    #[serde(default)]
+    pub preflight_ms: f64,
     pub render_ms: f64,
     pub encode_ms: f64,
     #[serde(default)]

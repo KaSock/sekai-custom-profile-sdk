@@ -33,6 +33,9 @@ pub(crate) fn export_profile_animation(
     preset: &ResolvedAnimationPreset,
     config: &crate::render_config::RenderConfig,
 ) -> Result<ProfileAnimationExport, AnimationError> {
+    // PERF-ANIM-05: Previously render_ms started after scene construction and
+    // preflight, leaving both costs invisible in BOT animation stage logs.
+    let scene_started = std::time::Instant::now();
     let CardSources {
         md,
         assets,
@@ -63,7 +66,10 @@ pub(crate) fn export_profile_animation(
         .map_err(RenderError::Render)?;
         (scene, Some(resolved))
     };
+    let scene_prepare_ms = scene_started.elapsed().as_secs_f64() * 1000.0;
+    let preflight_started = std::time::Instant::now();
     let preflight = scene.animation_preflight(preset.maximum_ticks)?;
+    let preflight_ms = preflight_started.elapsed().as_secs_f64() * 1000.0;
     if !preflight.animated {
         return Ok(ProfileAnimationExport {
             animated: false,
@@ -79,6 +85,8 @@ pub(crate) fn export_profile_animation(
                 layer_raster_bytes: 0,
                 layer_scratch_peak_bytes: 0,
                 peak_export_bytes: 0,
+                scene_prepare_ms,
+                preflight_ms,
                 render_ms: 0.0,
                 encode_ms: 0.0,
                 frame_full_composites: 0,
@@ -277,6 +285,8 @@ pub(crate) fn export_profile_animation(
             peak_export_bytes: base_peak_export_bytes
                 .saturating_add(frame_telemetry.deferred_cache_peak_bytes)
                 .saturating_add(encode_telemetry.gif_retained_frame_bytes),
+            scene_prepare_ms,
+            preflight_ms,
             render_ms,
             encode_ms,
             frame_full_composites: frame_telemetry.full_composites,
