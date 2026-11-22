@@ -19,7 +19,7 @@
 //! dropped when the transform is not axis-aligned.
 
 use freetype::face::LoadFlag;
-use freetype::{Face, Library, Matrix, Vector};
+use freetype::{Face, Library, Matrix, RenderMode, Vector};
 
 use crate::profile_compositor::RgbaSurface;
 
@@ -59,6 +59,7 @@ pub(crate) fn draw_centered_white_text(
     font_size: f32,
     matrix: Affine,
     baseline: f32,
+    bold: bool,
 ) -> Result<bool, String> {
     let RgbaSurface {
         pixels: destination,
@@ -106,8 +107,18 @@ pub(crate) fn draw_centered_white_text(
     let mut pen_x = a * start + c * baseline + e;
     let mut pen_y = b * start + d * baseline + f;
     for (ch, advance) in text.chars().zip(advances) {
-        face.load_char(ch as usize, flags | LoadFlag::RENDER)
-            .map_err(|error| format!("failed to render glyph {ch:?}: {error:?}"))?;
+        if bold {
+            face.load_char(ch as usize, flags | LoadFlag::NO_BITMAP)
+                .map_err(|error| format!("failed to load glyph {ch:?}: {error:?}"))?;
+            // FreeType owns the loaded slot. Embolden before borrowing its bitmap.
+            unsafe { freetype::ffi::FT_GlyphSlot_Embolden(face.raw().glyph) };
+            face.glyph()
+                .render_glyph(RenderMode::Normal)
+                .map_err(|error| format!("failed to render glyph {ch:?}: {error:?}"))?;
+        } else {
+            face.load_char(ch as usize, flags | LoadFlag::RENDER)
+                .map_err(|error| format!("failed to render glyph {ch:?}: {error:?}"))?;
+        }
         let glyph = face.glyph();
         let bitmap = glyph.bitmap();
         // No subpixel positioning: each glyph blits at its rounded pen point.

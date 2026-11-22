@@ -1425,20 +1425,15 @@ fn live_master_honor_keeps_only_the_progress_overlay() {
         .iter()
         .find(|node| node.role == "honor-42-progress")
         .expect("Live Master progress command");
-    assert_eq!(
-        progress.bounds,
-        crate::Rect {
-            x: -148.0,
-            y: 13.0,
-            width: 80.0,
-            height: 20.0,
-        }
-    );
+    assert_eq!(progress.bounds.x, -142.0);
+    assert!((progress.bounds.y - 12.7).abs() < 0.001);
+    assert_eq!(progress.bounds.width, 64.0);
+    assert_eq!(progress.bounds.height, 18.0);
     assert!(matches!(
         &progress.payload,
         super::GeneralRecipePayload::Text {
             source: TextSource::ProfileField { value, .. },
-            font_size: 20.0,
+            font_size: 18.0,
             align: super::GeneralTextAlign::Center,
             ..
         } if value == "73"

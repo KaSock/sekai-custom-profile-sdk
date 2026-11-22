@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub(crate) use honor::{live_master_progress_layout, live_master_scroll_offset};
 pub use keys::{
     authored_kind_name, card_member_lookup_key, collection_normal_map_lookup_key,
     component_control_id, interaction_region_id, resource_lookup_key, semantic_command_id,

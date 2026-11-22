@@ -283,7 +283,11 @@ fn missing_mmap_texture_uses_asset_store_without_leaving_software_compositor() {
 /// x = 80 with its baseline at y = 30.
 #[test]
 fn live_master_progress_draws_simple_text_pixels_without_sdf() {
-    if !progress_face_is_pinned() {
+    if crate::sdf::outline::load_font_bytes_for_family(
+        crate::profile_compositor::theme::fonts::LIVE_MASTER_PROGRESS,
+    )
+    .is_none()
+    {
         return;
     }
 
@@ -313,14 +317,12 @@ fn live_master_progress_draws_simple_text_pixels_without_sdf() {
         *color = [1.0; 4];
         *alignment = 2;
     }
-    let scene = scene(
-        test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
-        vec![command],
-    );
+    let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let regular_scene = scene(layer.clone(), vec![command.clone()]);
     let (_temp, store) = store(vec![("dummy", 1, 1, vec![0; 4])]);
     let mut actual = vec![0; 200 * 80 * 4];
     let stats = render_image_commands_into(
-        &scene,
+        &regular_scene,
         CompositorSources::new(&store),
         CommandFilter::default(),
         RgbaSurface::new(&mut actual, 200, 80).expect("tight surface"),
@@ -336,12 +338,44 @@ fn live_master_progress_draws_simple_text_pixels_without_sdf() {
         .iter()
         .all(|pixel| pixel[0] == pixel[3] && pixel[1] == pixel[3] && pixel[2] == pixel[3]));
     assert!(actual.iter().any(|&value| value != 0), "drew nothing");
-    assert_eq!(
-        hex::encode(Sha256::digest(&actual)),
-        "be9bb8841d6ce8748fe6b1c8e24924dd88f2aec57805b1e2082462e2e1a9c4e6"
-    );
+    if progress_face_is_pinned() {
+        assert_eq!(
+            hex::encode(Sha256::digest(&actual)),
+            "be9bb8841d6ce8748fe6b1c8e24924dd88f2aec57805b1e2082462e2e1a9c4e6"
+        );
+    }
     assert_eq!(stats.text_command_count, 1);
     assert_eq!(stats.skipped_text_command_count, 0);
+
+    // Explicit placement uses TMP units. Keep the same size and baseline to
+    // isolate the difference in glyph weight.
+    command.render_placement = Some(sekai_profile_core::TextRenderPlacementSource {
+        anchor_x: 0.0,
+        baseline: Some(5.0),
+    });
+    if let SemanticCommandPayload::Text { size, .. } = &mut command.payload {
+        *size = 10.0;
+    }
+    let bold_scene = scene(layer, vec![command]);
+    let mut bold = vec![0; actual.len()];
+    render_image_commands_into(
+        &bold_scene,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut bold, 200, 80).expect("tight surface"),
+        ImageExecutor::Scalar,
+    )
+    .unwrap();
+    let coverage = |pixels: &[u8]| {
+        pixels
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .copied()
+            .map(u64::from)
+            .sum::<u64>()
+    };
+    assert!(coverage(&bold) > coverage(&actual));
 }
 
 /// The digit raster blends over content that is already on the page, not
@@ -599,7 +633,7 @@ fn indexed_authored_commands_and_avx2_preserve_order_masks_clips_and_isolation()
                     namespace: "assets".into(),
                     key: "mask".into(),
                 });
-                *clip = Some(sekai_profile_core::ImageClip::RoundedRect { radius: 2.0 });
+                *clip = Some(sekai_profile_core::ImageClip::RoundedRect { radius: [2.0; 2] });
                 *color = tint;
             }
             let mut end = composite_command("end", id, CompositeOperation::EndIsolation);

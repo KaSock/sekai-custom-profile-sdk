@@ -1001,6 +1001,37 @@ fn honor_object() -> serde_json::Value {
 }
 
 #[test]
+fn live_master_progress_has_bold_layout_and_plain_glyph_demand() {
+    let card = serde_json::from_value(serde_json::json!({
+        "honors": [{ "objectData": honor_object(), "id": 3013, "fullSize": true }]
+    }))
+    .unwrap();
+    let profile = ProfileData::from_json(&serde_json::json!({
+        "userHonors": [[3013, 1, null]],
+        "userHonorMissions": [{ "honorMissionType": "master_full_combo", "progress": 309 }]
+    }));
+    let mut data = JsonMasterData::new("cn");
+    data.insert_value(
+        "honors",
+        serde_json::json!([{
+            "id": 3013,
+            "honorMissionType": "master_full_combo",
+            "levels": [{ "level": 1, "assetbundleName": "sample", "honorRarity": "low" }]
+        }]),
+    )
+    .unwrap();
+    data.insert_value(
+        "customProfileTextFonts",
+        serde_json::json!([{ "id": 1, "fontName": "SyntheticSans" }]),
+    )
+    .unwrap();
+
+    let prepared = prepare_profile(&card, Some(&profile), &data, "live-master", "cn").unwrap();
+    assert_eq!(prepared.layout_layers[0].text, "<b>309</b>");
+    assert_eq!(prepared.glyph_layers[0].text, "309");
+}
+
+#[test]
 fn bonds_honor_word_art_follows_the_honor_rarity() {
     let mut data = JsonMasterData::new("cn");
     data.insert_value(

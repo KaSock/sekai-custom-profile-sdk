@@ -6,7 +6,8 @@ use super::{
     GeneralImageSourceConstraint, GeneralRecipeNode, GeneralRecipePayload, GeneralTextAlign,
 };
 use crate::profile_scene::{
-    HonorVisualKind, HonorVisualSnapshot, ProfileComponentSnapshot, ResourceDescriptor,
+    live_master_progress_layout, live_master_scroll_offset, HonorVisualKind, HonorVisualSnapshot,
+    ProfileComponentSnapshot, ResourceDescriptor,
 };
 use crate::{BlendMode, InteractionRegionSource, ParameterValue, Rect, TextSource};
 
@@ -140,11 +141,7 @@ fn build_standard_honor_recipe(
     }
     if let Some(value) = overlay {
         let (dx, dy) = if *is_live_master {
-            if honor.full_size {
-                (218.0, 3.0)
-            } else {
-                (40.0, 3.0)
-            }
+            live_master_scroll_offset(honor.full_size)
         } else if honor_type == "rank_match" {
             if honor.full_size {
                 (190.0, 0.0)
@@ -175,19 +172,14 @@ fn build_standard_honor_recipe(
         ));
     }
     if *is_live_master {
-        let font_size = 20.0;
-        let baseline = cy + 30.0;
+        let value = progress.to_string();
+        let (text_bounds, font_size) = live_master_progress_layout(bounds, honor.full_size, &value);
         nodes.push(text_node(
             layer.key(&format!("honor-{}-progress", honor.honor_id), base + 3),
-            Rect {
-                x: cx + if honor.full_size { 40.0 } else { -40.0 },
-                y: baseline - font_size * 0.35 - font_size / 2.0,
-                width: 80.0,
-                height: font_size,
-            },
+            text_bounds,
             TextSource::ProfileField {
                 field: format!("userHonorMissions.{}", honor.honor_id),
-                value: progress.to_string(),
+                value,
             },
             font_size,
             [1.0; 4],

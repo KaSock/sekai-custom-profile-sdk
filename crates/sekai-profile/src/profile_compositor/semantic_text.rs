@@ -48,8 +48,14 @@ pub(super) fn render_live_master_progress_text(
         | TextSource::MasterData { value, .. }
         | TextSource::Localized { value, .. } => value,
     };
-    let lowered_general = command.render_placement.is_some();
-    let font_size = if lowered_general { *size * 2.0 } else { *size };
+    // Older scenes without explicit placement used scene-space sizes and
+    // the original regular-weight digit raster.
+    let has_explicit_placement = command.render_placement.is_some();
+    let font_size = if has_explicit_placement {
+        *size * 2.0
+    } else {
+        *size
+    };
     let baseline = command
         .render_placement
         .as_ref()
@@ -65,9 +71,10 @@ pub(super) fn render_live_master_progress_text(
         surface,
         crate::profile_compositor::theme::fonts::LIVE_MASTER_PROGRESS,
         text,
-        20.0,
+        font_size,
         matrix,
         baseline,
+        has_explicit_placement,
     )
     .map_err(|reason| ProfileCompositorError::SemanticSdf {
         role: command.role.clone(),

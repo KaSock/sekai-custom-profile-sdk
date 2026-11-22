@@ -177,6 +177,7 @@ fn build_profile_snapshot_inner(
     populate_card_member_visuals(card, profile, masterdata, document_key, &mut snapshot)?;
 
     let owned_honors = profile.map(|profile| &profile.owned_honors);
+    let mut placed_honor_requires_font = false;
     for element in ordered_profile_elements(card, document_key) {
         // Hidden honors are not built either.
         if !element.object().visible {
@@ -200,6 +201,13 @@ fn build_profile_snapshot_inner(
                     masterdata,
                     resource_metadata,
                 ) {
+                    placed_honor_requires_font |= matches!(
+                        &visual.visual,
+                        HonorVisualKind::Standard {
+                            is_live_master: true,
+                            ..
+                        }
+                    );
                     snapshot.honor_visuals.insert(element.source_key, visual);
                 }
             }
@@ -258,6 +266,11 @@ fn build_profile_snapshot_inner(
             if let Some(font) = masterdata.resolve_font(1) {
                 snapshot.fonts.insert(1, font);
             }
+        }
+    }
+    if placed_honor_requires_font && !snapshot.fonts.contains_key(&1) {
+        if let Some(font) = masterdata.resolve_font(1) {
+            snapshot.fonts.insert(1, font);
         }
     }
     Ok(snapshot)
@@ -516,7 +529,15 @@ fn prepare_profile_inner(
                         .get(&command.layer_id)
                         .cloned()
                         .unwrap_or_else(|| format!("{:016x}", command.layer_id.0)),
-                    text,
+                    // Match the heavier digits used on live-master scrolls.
+                    // Keep markup out of the profile field and glyph demand.
+                    text: if command.role.starts_with("honor-")
+                        && command.role.ends_with("-progress")
+                    {
+                        format!("<b>{text}</b>")
+                    } else {
+                        text
+                    },
                     font_id: *font_id,
                     font_family,
                     z: command_index as f32,

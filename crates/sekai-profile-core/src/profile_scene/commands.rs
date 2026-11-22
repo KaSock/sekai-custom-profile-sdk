@@ -1,21 +1,12 @@
 //! Builders of the image, composite and text commands of component lowering.
 
 use super::keys::semantic_command_id;
-use super::layer::{layout_bounds, rect_quad};
+use super::layer::rect_quad;
 use super::snapshot::ResourceDescriptor;
-use crate::profile_layout::ElementLayout;
 use crate::{
     CompositeOperation, FontRole, Rect, SemanticCommandPayload, SemanticCommandSource, StableId,
+    TextRenderPlacementSource,
 };
-
-/// How a component text is set: its alignment flags (1 = left, 2 = center,
-/// 4 = right), its size and its colour.
-#[derive(Clone, Copy)]
-pub(super) struct TextStyle {
-    pub(super) alignment: u8,
-    pub(super) size: f32,
-    pub(super) color: [f32; 4],
-}
 
 /// The commands of one element layer, appended in draw order. Each command id
 /// derives from the element's source key, the command role and the number of
@@ -102,15 +93,15 @@ impl<'a> LayerCommands<'a> {
         self.push(command);
     }
 
-    /// Appends a text command showing `value`, the value of the profile field
-    /// `field`, laid out in `layout` with the region font 1.
-    pub(super) fn push_profile_text(
+    /// Appends a single centered line with a scene-space font size, as used
+    /// by General text nodes.
+    pub(super) fn push_centered_profile_text(
         &mut self,
         role: &str,
         field: &str,
         value: String,
-        layout: ElementLayout,
-        style: TextStyle,
+        bounds: Rect,
+        font_size: f32,
     ) {
         let mut command = SemanticCommandSource::profile_text(
             self.next_id(role),
@@ -120,48 +111,22 @@ impl<'a> LayerCommands<'a> {
             value,
             FontRole::RegionFontId(1),
         );
-        configure_text_command(&mut command, layout, style.alignment, style.size, 0.0);
-        set_text_color(&mut command, style.color);
+        command.bounds = bounds;
+        command.matrix[4] = bounds.x + bounds.width / 2.0;
+        command.matrix[5] = bounds.y + bounds.height / 2.0;
+        command.hit_geometry = rect_quad(bounds);
+        let text_scale = crate::tmp_text::PROFILE_FACE.scale;
+        command.render_placement = Some(TextRenderPlacementSource {
+            anchor_x: 0.0,
+            baseline: Some(font_size * 0.35 / text_scale),
+        });
+        if let SemanticCommandPayload::Text {
+            size, alignment, ..
+        } = &mut command.payload
+        {
+            *size = font_size / text_scale;
+            *alignment = 2;
+        }
         self.push(command);
-    }
-}
-
-fn configure_text_command(
-    command: &mut SemanticCommandSource,
-    layout: ElementLayout,
-    alignment: u8,
-    size: f32,
-    line_spacing: f32,
-) {
-    command.bounds = layout_bounds(layout);
-    // Alignment is the low bits of the authored TextAlignmentOptions value:
-    // a bitmask where 1 = left, 2 = center, 4 = right.
-    command.matrix[4] = match alignment {
-        2 => layout.cx,
-        4 => layout.cx + layout.w / 2.0,
-        _ => layout.cx - layout.w / 2.0,
-    };
-    command.matrix[5] = -layout.cy;
-    command.hit_geometry = rect_quad(command.bounds);
-    if let SemanticCommandPayload::Text {
-        size: command_size,
-        line_spacing: command_line_spacing,
-        alignment: command_alignment,
-        max_width,
-        max_height,
-        ..
-    } = &mut command.payload
-    {
-        *command_size = size;
-        *command_line_spacing = line_spacing;
-        *command_alignment = alignment;
-        *max_width = Some(layout.w);
-        *max_height = Some(layout.h);
-    }
-}
-
-fn set_text_color(command: &mut SemanticCommandSource, color: [f32; 4]) {
-    if let SemanticCommandPayload::Text { color: target, .. } = &mut command.payload {
-        *target = color;
     }
 }

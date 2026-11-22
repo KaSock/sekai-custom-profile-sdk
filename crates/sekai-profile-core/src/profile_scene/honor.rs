@@ -2,12 +2,39 @@
 
 use std::collections::BTreeMap;
 
-use super::commands::{LayerCommands, TextStyle};
+use super::commands::LayerCommands;
 use super::layer::component_interaction_region;
 use super::snapshot::{HonorVisualKind, HonorVisualSnapshot, ResourceDescriptor};
 use super::ProfileResolveError;
 use crate::profile_layout::ElementLayout;
 use crate::{InteractionRegionSource, ParameterValue, Rect, StableId};
+
+pub(crate) fn live_master_scroll_offset(full_size: bool) -> (f32, f32) {
+    (if full_size { 218.0 } else { 40.0 }, 3.0)
+}
+
+pub(crate) fn live_master_progress_layout(
+    bounds: Rect,
+    full_size: bool,
+    text: &str,
+) -> (Rect, f32) {
+    let (scroll_x, _) = live_master_scroll_offset(full_size);
+    let center_x = bounds.x + scroll_x + 50.0;
+    // The font baseline sits below the center of the ribbon behind the digits.
+    let baseline = bounds.y + 68.0;
+    let width = 64.0;
+    // Reserve up to one em per character so long counts stay on one line.
+    let font_size = (width / text.len().max(1) as f32).min(18.0);
+    (
+        Rect {
+            x: center_x - width / 2.0,
+            y: baseline - font_size * 0.35 - font_size / 2.0,
+            width,
+            height: font_size,
+        },
+        font_size,
+    )
+}
 
 pub(super) fn lower_honor_visual(
     commands: &mut LayerCommands<'_>,
@@ -76,11 +103,7 @@ fn lower_standard_honor(
     }
     if let Some(overlay) = overlay {
         let (dx, dy) = if *is_live_master {
-            if honor.full_size {
-                (218.0, 3.0)
-            } else {
-                (40.0, 3.0)
-            }
+            live_master_scroll_offset(honor.full_size)
         } else if honor_type == "rank_match" {
             if honor.full_size {
                 (190.0, 0.0)
@@ -110,22 +133,14 @@ fn lower_standard_honor(
         );
     }
     if *is_live_master {
-        let text_layout = ElementLayout {
-            cx: origin_x - w / 2.0 + if honor.full_size { 270.0 } else { 90.0 },
-            cy: -(origin_y - h / 2.0 + 60.0),
-            w: 80.0,
-            h: 20.0,
-        };
-        commands.push_profile_text(
+        let value = progress.to_string();
+        let (bounds, font_size) = live_master_progress_layout(full_bounds, honor.full_size, &value);
+        commands.push_centered_profile_text(
             &format!("honor-{}-progress", honor.honor_id),
             &format!("userHonorMissions.{}", honor.honor_id),
-            progress.to_string(),
-            text_layout,
-            TextStyle {
-                alignment: 2,
-                size: 20.0,
-                color: [1.0; 4],
-            },
+            value,
+            bounds,
+            font_size,
         );
     } else if *has_star {
         lower_honor_stars(commands, honor, layout, star.as_ref(), star_high.as_ref());
